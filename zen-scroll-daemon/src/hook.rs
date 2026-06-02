@@ -3,7 +3,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, MSG, MSLLHOOKSTRUCT, SetWindowsHookExW, WH_MOUSE_LL,
+    CallNextHookEx, GetMessageW, MSG, MSLLHOOKSTRUCT, SetWindowsHookExW, UnhookWindowsHookEx,
+    WH_MOUSE_LL, HHOOK,
     WM_MOUSEWHEEL,
 };
 
@@ -30,11 +31,9 @@ impl HookState {
 pub static HOOK_STATE: std::sync::LazyLock<Mutex<HookState>> =
     std::sync::LazyLock::new(|| Mutex::new(HookState::new()));
 
-unsafe extern "system" fn low_level_mouse_proc(
-    n_code: i32,
-    w_param: WPARAM,
-    l_param: LPARAM,
-) -> LRESULT {
+pub static HOOK_HANDLE: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+
+extern "system" fn low_level_mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     if INJECTING.load(Ordering::SeqCst) {
         return unsafe { CallNextHookEx(None, n_code, w_param, l_param) };
     }
@@ -59,7 +58,12 @@ unsafe extern "system" fn low_level_mouse_proc(
                             state.current_process = p.name.to_string();
                             state.injector.set_config(p.config.clone());
                             state.injector.feed_wheel(raw_delta);
-                            debug_log!("Hook -> {} (delta={}, V={:.0})", p.name, raw_delta, state.injector.velocity());
+                            debug_log!(
+                                "Hook -> {} (delta={}, V={:.0})",
+                                p.name,
+                                raw_delta,
+                                state.injector.velocity()
+                            );
                             return LRESULT(1);
                         } else {
                             debug_log!("{} matched but DISABLED", target.process_name);
@@ -78,10 +82,24 @@ unsafe extern "system" fn low_level_mouse_proc(
 pub fn install_hook() -> Result<(), windows::core::Error> {
     unsafe {
         let hmod: HINSTANCE = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?.into();
-        SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), hmod, 0)?;
+        let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), hmod, 0)?;
+        if let Ok(mut guard) = HOOK_HANDLE.lock() {
+            *guard = Some(hook.0 as isize);
+        }
     }
 
     Ok(())
+}
+
+pub fn uninstall_hook() {
+    if let Ok(mut guard) = HOOK_HANDLE.lock() {
+        if let Some(raw) = guard.take() {
+            unsafe {
+                let _ = UnhookWindowsHookEx(HHOOK(raw as *mut _));
+            }
+            eprintln!("[ZenScroll] Hook uninstalled");
+        }
+    }
 }
 
 #[allow(dead_code)]
