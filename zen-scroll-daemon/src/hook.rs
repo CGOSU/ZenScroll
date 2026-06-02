@@ -91,6 +91,7 @@ pub fn install_hook() -> Result<(), windows::core::Error> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn uninstall_hook() {
     if let Ok(mut guard) = HOOK_HANDLE.lock() {
         if let Some(raw) = guard.take() {

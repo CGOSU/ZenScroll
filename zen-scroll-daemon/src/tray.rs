@@ -36,7 +36,7 @@ fn to_wstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe extern "system" fn tray_window_proc(
+extern "system" fn tray_window_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
@@ -75,9 +75,7 @@ unsafe extern "system" fn tray_window_proc(
             }
             CMD_QUIT => {
                 TRAY_EXIT.store(true, Ordering::SeqCst);
-                unsafe {
-                    let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
+                unsafe { let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)); }
             }
             _ => {}
         }
@@ -86,9 +84,7 @@ unsafe extern "system" fn tray_window_proc(
 
     if msg == WM_DESTROY {
         remove_tray_icon(hwnd);
-        unsafe {
-            PostQuitMessage(0);
-        }
+        unsafe { PostQuitMessage(0); }
         return LRESULT(0);
     }
 
@@ -96,37 +92,19 @@ unsafe extern "system" fn tray_window_proc(
 }
 
 fn show_context_menu(hwnd: HWND) {
+    let menu = unsafe { CreatePopupMenu().unwrap() };
+    let enabled = hook::HOOK_STATE.lock().map(|s| s.enabled).unwrap_or(true);
+
+    let status_w = to_wstr(if enabled { " Running" } else { " Stopped" });
+    let toggle_w = to_wstr(if enabled { "Disable" } else { "Enable" });
+    let quit_w = to_wstr("Quit");
+
     unsafe {
-        let menu = CreatePopupMenu().unwrap();
-        let enabled = hook::HOOK_STATE.lock().map(|s| s.enabled).unwrap_or(true);
-
-        let status_w = to_wstr(if enabled { " Running" } else { " Stopped" });
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING | MF_GRAYED | MF_BYCOMMAND,
-            CMD_STATUS as usize,
-            PCWSTR::from_raw(status_w.as_ptr()),
-        );
-
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_BYCOMMAND, CMD_STATUS as usize, PCWSTR::from_raw(status_w.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, PCWSTR::null());
-
-        let toggle_w = to_wstr(if enabled { "Disable" } else { "Enable" });
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING | MF_BYCOMMAND,
-            CMD_TOGGLE as usize,
-            PCWSTR::from_raw(toggle_w.as_ptr()),
-        );
-
+        let _ = AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_TOGGLE as usize, PCWSTR::from_raw(toggle_w.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, PCWSTR::null());
-
-        let quit_w = to_wstr("Quit");
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING | MF_BYCOMMAND,
-            CMD_QUIT as usize,
-            PCWSTR::from_raw(quit_w.as_ptr()),
-        );
+        let _ = AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_QUIT as usize, PCWSTR::from_raw(quit_w.as_ptr()));
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -137,108 +115,96 @@ fn show_context_menu(hwnd: HWND) {
 }
 
 fn remove_tray_icon(hwnd: HWND) {
-    unsafe {
-        let mut nid = NOTIFYICONDATAW::default();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
-    }
+    let mut nid = NOTIFYICONDATAW::default();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    unsafe { let _ = Shell_NotifyIconW(NIM_DELETE, &nid); }
 }
 
 fn update_tray_tip(hwnd: HWND) {
-    unsafe {
-        let enabled = hook::HOOK_STATE.lock().map(|s| s.enabled).unwrap_or(true);
-        let proc_name = hook::HOOK_STATE.lock().map(|s| s.current_process.clone()).unwrap_or_default();
-        let status = if enabled { "Running" } else { "Stopped" };
-        let tip = if proc_name.is_empty() {
-            format!("ZenScroll [{}]", status)
-        } else {
-            format!("ZenScroll [{}] - {}", status, proc_name)
-        };
+    let enabled = hook::HOOK_STATE.lock().map(|s| s.enabled).unwrap_or(true);
+    let proc_name = hook::HOOK_STATE.lock().map(|s| s.current_process.clone()).unwrap_or_default();
+    let tip = if proc_name.is_empty() {
+        format!("ZenScroll [{}]", if enabled { "Running" } else { "Stopped" })
+    } else {
+        format!("ZenScroll [{}] - {}", if enabled { "Running" } else { "Stopped" }, proc_name)
+    };
 
-        let tip_wide = to_wstr(&tip);
+    let tip_wide = to_wstr(&tip);
 
-        let mut nid = NOTIFYICONDATAW::default();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_TIP;
-        let len = tip_wide.len().min(128);
-        nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
-    }
+    let mut nid = NOTIFYICONDATAW::default();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    let len = tip_wide.len().min(128);
+    nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
+    unsafe { let _ = Shell_NotifyIconW(NIM_MODIFY, &nid); }
 }
 
 pub fn create_tray_window() -> HWND {
-    unsafe {
-        let class_name = to_wstr("ZenScrollTray");
-        let class_ptr = PCWSTR::from_raw(class_name.as_ptr());
+    let class_name = to_wstr("ZenScrollTray");
+    let class_ptr = PCWSTR::from_raw(class_name.as_ptr());
 
-        let wc = WNDCLASSW {
-            style: Default::default(),
-            lpfnWndProc: Some(tray_window_proc),
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hInstance: HINSTANCE(std::ptr::null_mut()),
-            hIcon: HICON::default(),
-            hCursor: HCURSOR::default(),
-            hbrBackground: HBRUSH::default(),
-            lpszMenuName: PCWSTR::null(),
-            lpszClassName: class_ptr,
-        };
+    let wc = WNDCLASSW {
+        style: Default::default(),
+        lpfnWndProc: Some(tray_window_proc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: HINSTANCE(std::ptr::null_mut()),
+        hIcon: HICON::default(),
+        hCursor: HCURSOR::default(),
+        hbrBackground: HBRUSH::default(),
+        lpszMenuName: PCWSTR::null(),
+        lpszClassName: class_ptr,
+    };
 
-        RegisterClassW(&wc);
+    unsafe { RegisterClassW(&wc); }
 
-        let hwnd = CreateWindowExW(
+    let hwnd = unsafe {
+        CreateWindowExW(
             WS_EX_TOOLWINDOW,
             class_ptr,
             PCWSTR::null(),
             WINDOW_STYLE(0),
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            None,
-            None,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            None, None,
             HINSTANCE(std::ptr::null_mut()),
             None,
-        ).unwrap();
+        ).unwrap()
+    };
 
-        static ICON_DATA: &[u8] = include_bytes!("../assets/icon.ico");
-        let entry_off = LookupIconIdFromDirectoryEx(
-            ICON_DATA.as_ptr(),
-            BOOL::from(true),
-            32, 32,
-            LR_DEFAULTCOLOR,
-        );
-        let icon = if entry_off > 0 {
-            let data = &ICON_DATA[entry_off as usize..];
+    static ICON_DATA: &[u8] = include_bytes!("../assets/icon.ico");
+    let entry_off = unsafe {
+        LookupIconIdFromDirectoryEx(ICON_DATA.as_ptr(), BOOL::from(true), 32, 32, LR_DEFAULTCOLOR)
+    };
+    let icon = if entry_off > 0 {
+        let data = &ICON_DATA[entry_off as usize..];
+        unsafe {
             CreateIconFromResourceEx(data, BOOL::from(true), 0x00030000, 32, 32, LR_DEFAULTCOLOR)
                 .unwrap_or(HICON::default())
-        } else {
-            HICON::default()
-        };
+        }
+    } else {
+        HICON::default()
+    };
 
-        let msg_id: u32 = WM_TRAY_ICON;
-        let tip_wide = to_wstr("ZenScroll");
+    let mut nid = NOTIFYICONDATAW::default();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY_ICON;
+    nid.hIcon = icon;
+    let tip_wide = to_wstr("ZenScroll");
+    let len = tip_wide.len().min(128);
+    nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
 
-        let mut nid = NOTIFYICONDATAW::default();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-        nid.uCallbackMessage = msg_id;
-        nid.hIcon = icon;
-        let len = tip_wide.len().min(128);
-        nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
+    unsafe { let _ = Shell_NotifyIconW(NIM_ADD, &nid); }
 
-        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    *TRAY_HWND.lock().unwrap() = Some(hwnd.0 as isize);
 
-        *TRAY_HWND.lock().unwrap() = Some(hwnd.0 as isize);
-
-        hwnd
-    }
+    hwnd
 }
 
 pub fn destroy_tray() {
