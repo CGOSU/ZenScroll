@@ -1381,6 +1381,20 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "embed-resource"
+version = "2.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d506610004cfc74a6f5ee7e8c632b355de5eca1f03ee5e5e0ec11b77d4eb3d61"
+dependencies = [
+ "cc",
+ "memchr",
+ "rustc_version",
+ "toml 0.8.23",
+ "vswhom",
+ "winreg 0.52.0",
+]
+
+[[package]]
+name = "embed-resource"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c31a88c8d26de40ed18fe748c547845aa39de1db3afd958f8cb91579f3644bcb"
@@ -1390,7 +1404,7 @@ dependencies = [
  "rustc_version",
  "toml 1.1.2+spec-1.1.0",
  "vswhom",
- "winreg",
+ "winreg 0.55.0",
 ]
 
 [[package]]
@@ -2037,7 +2051,7 @@ dependencies = [
  "cosmic-text",
  "ctor",
  "derive_more",
- "embed-resource",
+ "embed-resource 3.0.9",
  "etagere",
  "filedescriptor",
  "flume",
@@ -6616,6 +6630,16 @@ dependencies = [
 
 [[package]]
 name = "winreg"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a277a57398d4bfa075df44f501a17cfdf8542d224f0d36095a2adc7aee4ef0a5"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "winreg"
 version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
@@ -7089,6 +7113,7 @@ name = "zen-scroll-daemon"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "embed-resource 2.5.2",
  "serde",
  "serde_json",
  "windows 0.58.0",
@@ -7099,6 +7124,7 @@ dependencies = [
 name = "zen-scroll-ui"
 version = "0.1.0"
 dependencies = [
+ "embed-resource 2.5.2",
  "gpui",
  "serde_json",
  "zen-scroll-core",

@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct HWND(isize);
 
 const WM_APP: u32 = 0x8000;
@@ -15,6 +16,16 @@ const WM_APP: u32 = 0x8000;
 unsafe extern "system" {
     fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
     fn PostMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> i32;
+    fn GetActiveWindow() -> HWND;
+    fn GetModuleHandleW(lpModuleName: *const u16) -> isize;
+    fn LoadImageW(
+        hInst: isize,
+        name: *const u16,
+        type_: u32,
+        cx: i32,
+        cy: i32,
+        fuLoad: u32,
+    ) -> isize;
     fn ShellExecuteW(
         hwnd: *mut std::ffi::c_void,
         lpOperation: *const u16,
@@ -129,6 +140,18 @@ fn signal_daemon() {
     }
 }
 
+fn set_window_icon() {
+    unsafe {
+        let hwnd = GetActiveWindow();
+        if hwnd.0 == 0 { return; }
+        let hmod = GetModuleHandleW(std::ptr::null());
+        let icon = LoadImageW(hmod, 1 as *const u16, 1, 32, 32, 0);
+        if icon != 0 {
+            PostMessageW(hwnd, 0x0080, 0, icon);
+            PostMessageW(hwnd, 0x0080, 1, icon);
+        }
+    }
+}
 const PRESET_NAMES: [&str; 3] = ["慢", "正常", "快"];
 const PRESET_LABELS: [&str; 3] = [
     "精准·适合阅读/代码",
@@ -368,7 +391,12 @@ fn main() {
             |_, cx| cx.new(|_| ConfigPanel::new()),
         )
         .unwrap();
+        set_window_icon();
         cx.activate(true);
     });
 }
+
+
+
+
 

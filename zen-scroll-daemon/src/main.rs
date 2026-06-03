@@ -6,8 +6,8 @@ mod profile;
 mod smoother;
 mod tray;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -51,12 +51,8 @@ fn restore_scroll_lines() {
         unsafe {
             let val: u32 = WHEEL_PAGESCROLL;
             let ptr = &val as *const u32 as *mut core::ffi::c_void;
-            let _ = SystemParametersInfoW(
-                SPI_SETWHEELSCROLLLINES,
-                0,
-                Some(ptr),
-                SPIF_UPDATEINIFILE,
-            );
+            let _ =
+                SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 0, Some(ptr), SPIF_UPDATEINIFILE);
         }
         eprintln!("[ZenScroll] Restored system scroll to 'one page'");
     }
@@ -69,7 +65,10 @@ fn main() {
     if let Ok(cfg) = config::DAEMON_CONFIG.lock() {
         log::set_debug(cfg.debug);
         if !cfg.custom_profiles.is_empty() {
-            eprintln!("[ZenScroll] Loaded {} custom profiles", cfg.custom_profiles.len());
+            eprintln!(
+                "[ZenScroll] Loaded {} custom profiles",
+                cfg.custom_profiles.len()
+            );
             profile::apply_custom_profiles(&cfg.custom_profiles);
         }
     }
@@ -88,7 +87,10 @@ fn main() {
 
     let _tray_hwnd = tray::create_tray_window();
 
-    println!("[ZenScroll] System scroll optimizer started (enabled={})", config::is_enabled());
+    println!(
+        "[ZenScroll] System scroll optimizer started (enabled={})",
+        config::is_enabled()
+    );
     println!("[ZenScroll] Right-click tray icon to control");
 
     let running = Arc::new(AtomicBool::new(true));
