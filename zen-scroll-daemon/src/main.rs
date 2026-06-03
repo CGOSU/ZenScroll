@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 mod config;
 mod detect;
 mod hook;
@@ -22,25 +23,24 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 static ORIGINAL_SCROLL_LINES: AtomicU32 = AtomicU32::new(3);
 
 fn save_and_override_scroll_lines() {
-    unsafe {
-        let mut lines: u32 = 0;
-        let ptr = &mut lines as *mut u32 as *mut core::ffi::c_void;
-        if SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, Some(ptr), SPIF_UPDATEINIFILE).is_ok()
-        {
-            ORIGINAL_SCROLL_LINES.store(lines, Ordering::SeqCst);
-            if lines == WHEEL_PAGESCROLL {
-                eprintln!("[ZenScroll] System scroll was 'one page', overriding to 1 line");
-                let val: u32 = 1;
-                let ptr = &val as *const u32 as *mut core::ffi::c_void;
-                let _ = SystemParametersInfoW(
-                    SPI_SETWHEELSCROLLLINES,
-                    1,
-                    Some(ptr),
-                    SPIF_UPDATEINIFILE,
-                );
-            } else {
-                eprintln!("[ZenScroll] System scroll lines = {}, keeping as-is", lines);
-            }
+    let mut lines: u32 = 0;
+    let ptr = &mut lines as *mut u32 as *mut core::ffi::c_void;
+    // SAFETY: SystemParametersInfoW queries the system wheel scroll lines. ptr points to a valid u32.
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, Some(ptr), SPIF_UPDATEINIFILE).is_ok()
+    };
+    if ok {
+        ORIGINAL_SCROLL_LINES.store(lines, Ordering::SeqCst);
+        if lines == WHEEL_PAGESCROLL {
+            eprintln!("[ZenScroll] System scroll was 'one page', overriding to 1 line");
+            let val: u32 = 1;
+            let ptr = &val as *const u32 as *mut core::ffi::c_void;
+            // SAFETY: SystemParametersInfoW sets the wheel scroll lines to 1. ptr is a valid u32.
+            let _ = unsafe {
+                SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 1, Some(ptr), SPIF_UPDATEINIFILE)
+            };
+        } else {
+            eprintln!("[ZenScroll] System scroll lines = {}, keeping as-is", lines);
         }
     }
 }
@@ -48,9 +48,10 @@ fn save_and_override_scroll_lines() {
 fn restore_scroll_lines() {
     let original = ORIGINAL_SCROLL_LINES.load(Ordering::SeqCst);
     if original == WHEEL_PAGESCROLL {
+        let val: u32 = WHEEL_PAGESCROLL;
+        let ptr = &val as *const u32 as *mut core::ffi::c_void;
+        // SAFETY: SystemParametersInfoW restores the system wheel scroll lines to WHEEL_PAGESCROLL.
         unsafe {
-            let val: u32 = WHEEL_PAGESCROLL;
-            let ptr = &val as *const u32 as *mut core::ffi::c_void;
             let _ =
                 SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 0, Some(ptr), SPIF_UPDATEINIFILE);
         }
@@ -107,8 +108,10 @@ fn main() {
         injection_loop();
     });
 
+    let mut msg = MSG::default();
+    // SAFETY: Standard Windows message pump. GetMessageW blocks until a message arrives;
+    // TranslateMessage/DispatchMessageW process and dispatch it to the window procedure.
     unsafe {
-        let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);

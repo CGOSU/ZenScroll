@@ -9,6 +9,7 @@ pub struct TargetWindow {
 
 impl TargetWindow {
     pub fn foreground() -> Option<Self> {
+        // SAFETY: GetForegroundWindow retrieves the handle to the foreground window. Returns invalid handle if none.
         let hwnd = unsafe { GetForegroundWindow() };
 
         if hwnd.is_invalid() {
@@ -18,9 +19,8 @@ impl TargetWindow {
         debug_log!("detect: foreground HWND = {:?}", hwnd);
 
         let mut pid: u32 = 0;
-        unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
+        // SAFETY: hwnd is from GetForegroundWindow. GetWindowThreadProcessId writes the PID into pid.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
         if pid == 0 {
             debug_log!("detect: GetWindowThreadProcessId = 0");
             return None;
@@ -49,6 +49,7 @@ fn get_process_name(pid: u32) -> Option<String> {
     };
 
     debug_log!("detect: calling OpenProcess({})", pid);
+    // SAFETY: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION opens a handle for querying the process name.
     let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => h,
         Err(e) => {
@@ -62,6 +63,8 @@ fn get_process_name(pid: u32) -> Option<String> {
     let mut size = buf.len() as u32;
 
     debug_log!("detect: calling QueryFullProcessImageNameW(..., WIN32, ...)");
+    // SAFETY: handle is from OpenProcess. buf has 4096 elements which is sufficient for a Win32 path.
+    // PROCESS_NAME_FORMAT(0) = WIN32 format. size is in/out parameter populated by the kernel.
     let result = unsafe {
         QueryFullProcessImageNameW(
             handle,
@@ -83,6 +86,7 @@ fn get_process_name(pid: u32) -> Option<String> {
         debug_log!("detect: exe = '{}'", exe);
         Some(exe)
     } else {
+        // SAFETY: GetLastError retrieves the calling thread's last-error code after QueryFullProcessImageNameW failed.
         let err = unsafe { windows::Win32::Foundation::GetLastError() };
         debug_log!("detect: QueryFullProcessImageNameW failed, GetLastError={}", err.0);
         None

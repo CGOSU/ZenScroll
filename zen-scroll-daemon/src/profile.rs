@@ -30,7 +30,7 @@ pub fn find_profile(process_name: &str) -> Option<AppProfile> {
     let name_lower = process_name.to_lowercase();
     let guard = BUILTIN_PROFILES.lock().ok()?;
     guard.iter().find(|p| {
-        p.process_names.iter().any(|pn| name_lower == *pn)
+        p.process_names.contains(&name_lower)
     }).cloned()
 }
 

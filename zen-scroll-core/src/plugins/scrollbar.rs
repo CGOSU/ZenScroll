@@ -34,17 +34,16 @@ pub struct ScrollbarMetrics {
     pub visible: bool,
 }
 
+#[derive(Default)]
 pub struct Scrollbar {
     pub config: ScrollbarConfig,
     pub metrics: Option<ScrollbarMetrics>,
 }
 
+
 impl Scrollbar {
     pub fn new() -> Self {
-        Self {
-            config: ScrollbarConfig::default(),
-            metrics: None,
-        }
+        Self::default()
     }
 
     pub fn with_config(config: ScrollbarConfig) -> Self {

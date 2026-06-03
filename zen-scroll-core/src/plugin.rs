@@ -20,15 +20,15 @@ pub trait Plugin: Send {
     fn on_enabled_change(&mut self, _enabled: bool) {}
 }
 
+#[derive(Default)]
 pub struct PluginManager {
     plugins: Vec<Box<dyn Plugin>>,
 }
 
+
 impl PluginManager {
     pub fn new() -> Self {
-        Self {
-            plugins: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn register(&mut self, plugin: Box<dyn Plugin>) -> &mut Self {

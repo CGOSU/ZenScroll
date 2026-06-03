@@ -50,8 +50,9 @@ fn launch_ui() {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let verb: Vec<u16> = "open\0".encode_utf16().collect();
 
+    // SAFETY: ShellExecuteW("open") launches zen-scroll-ui.exe as a non-admin process.
     unsafe {
-        let _ = ShellExecuteW(
+        ShellExecuteW(
             HWND(std::ptr::null_mut()),
             PCWSTR::from_raw(verb.as_ptr()),
             PCWSTR::from_raw(wide.as_ptr()),
@@ -106,7 +107,8 @@ extern "system" fn tray_window_proc(
             }
             CMD_QUIT => {
                 TRAY_EXIT.store(true, Ordering::SeqCst);
-                unsafe { let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)); }
+                // SAFETY: PostMessageW sends WM_CLOSE to the tray window, which triggers WM_DESTROY and cleanup.
+            unsafe { let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)); }
             }
             _ => {}
         }
@@ -117,10 +119,10 @@ extern "system" fn tray_window_proc(
         config::reload();
         if let Ok(mut state) = hook::HOOK_STATE.lock() {
             state.enabled = config::is_enabled();
-            let _ = state.injector.set_config(config::current_config());
+            state.injector.set_config(config::current_config());
         }
         if let Ok(guard) = config::DAEMON_CONFIG.lock() {
-            let _ = profile::apply_custom_profiles(&guard.custom_profiles);
+            profile::apply_custom_profiles(&guard.custom_profiles);
         }
         eprintln!("[ZenScroll] Config reloaded via IPC");
         update_tray_tip(hwnd);
@@ -129,15 +131,19 @@ extern "system" fn tray_window_proc(
 
     if msg == WM_DESTROY {
         remove_tray_icon(hwnd);
+        // SAFETY: PostQuitMessage posts WM_QUIT to the message queue, causing GetMessageW to return false.
         unsafe { PostQuitMessage(0); }
         return LRESULT(0);
     }
 
+    // SAFETY: DefWindowProcW provides default processing for unhandled window messages.
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 fn show_context_menu(hwnd: HWND) {
-    let menu = unsafe { CreatePopupMenu().unwrap() };
+    // SAFETY: CreatePopupMenu creates a system menu handle. Returns null on failure.
+    let menu = unsafe { CreatePopupMenu() };
+    let Ok(menu) = menu else { return };
     let enabled = hook::HOOK_STATE.lock().map(|s| s.enabled).unwrap_or(true);
 
     let status_w = to_wstr(if enabled { " Running" } else { " Stopped" });
@@ -145,6 +151,9 @@ fn show_context_menu(hwnd: HWND) {
     let launch_w = to_wstr("Control Panel");
     let quit_w = to_wstr("Quit");
 
+    // SAFETY: Context menu lifecycle: AppendMenuW populates the menu, GetCursorPos retrieves cursor
+    // position for placement, SetForegroundWindow ensures proper menu dismissal on click-away,
+    // TrackPopupMenu displays the menu synchronously, DestroyMenu releases the menu resources.
     unsafe {
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_BYCOMMAND, CMD_STATUS as usize, PCWSTR::from_raw(status_w.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, PCWSTR::null());
@@ -163,10 +172,13 @@ fn show_context_menu(hwnd: HWND) {
 }
 
 fn remove_tray_icon(hwnd: HWND) {
-    let mut nid = NOTIFYICONDATAW::default();
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = 1;
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        ..Default::default()
+    };
+    // SAFETY: Shell_NotifyIconW(NIM_DELETE) removes the tray icon from the notification area.
     unsafe { let _ = Shell_NotifyIconW(NIM_DELETE, &nid); }
 }
 
@@ -181,13 +193,16 @@ fn update_tray_tip(hwnd: HWND) {
 
     let tip_wide = to_wstr(&tip);
 
-    let mut nid = NOTIFYICONDATAW::default();
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = 1;
-    nid.uFlags = NIF_TIP;
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_TIP,
+        ..Default::default()
+    };
     let len = tip_wide.len().min(128);
     nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
+    // SAFETY: Shell_NotifyIconW(NIM_MODIFY) updates the tooltip text for the tray icon.
     unsafe { let _ = Shell_NotifyIconW(NIM_MODIFY, &nid); }
 }
 
@@ -208,9 +223,11 @@ pub fn create_tray_window() -> HWND {
         lpszClassName: class_ptr,
     };
 
+    // SAFETY: RegisterClassW registers the "ZenScrollTray" window class. The WNDCLASSW struct is fully initialized.
     unsafe { RegisterClassW(&wc); }
 
-    let hwnd = unsafe {
+    // SAFETY: CreateWindowExW creates a WS_EX_TOOLWINDOW hidden window for tray message processing.
+    let hwnd = match unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW,
             class_ptr,
@@ -220,62 +237,75 @@ pub fn create_tray_window() -> HWND {
             None, None,
             HINSTANCE(std::ptr::null_mut()),
             None,
-        ).unwrap()
+        )
+    } {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("[ZenScroll] Failed to create tray window");
+            return HWND(std::ptr::null_mut());
+        }
     };
 
     static ICON_DATA: &[u8] = include_bytes!("../assets/icon.ico");
+    // SAFETY: LookupIconIdFromDirectoryEx finds the best-matching icon entry in the .ico data.
+    // ICON_DATA is a valid .ico file embedded at compile time.
     let entry_off = unsafe {
         LookupIconIdFromDirectoryEx(ICON_DATA.as_ptr(), BOOL::from(true), 32, 32, LR_DEFAULTCOLOR)
     };
     let icon = if entry_off > 0 {
         let data = &ICON_DATA[entry_off as usize..];
+        // SAFETY: CreateIconFromResourceEx creates an HICON from the icon entry identified by LookupIconIdFromDirectoryEx.
+        // data is a valid icon resource within the statically embedded .ico bytes.
         unsafe {
             CreateIconFromResourceEx(data, BOOL::from(true), 0x00030000, 32, 32, LR_DEFAULTCOLOR)
-                .unwrap_or(HICON::default())
-        }
+        }.unwrap_or(HICON::default())
     } else {
         HICON::default()
     };
 
-    let mut nid = NOTIFYICONDATAW::default();
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = 1;
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    nid.uCallbackMessage = WM_TRAY_ICON;
-    nid.hIcon = icon;
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: WM_TRAY_ICON,
+        hIcon: icon,
+        ..Default::default()
+    };
     let tip_wide = to_wstr("ZenScroll");
     let len = tip_wide.len().min(128);
     nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
 
+    // SAFETY: Shell_NotifyIconW(NIM_ADD) creates the tray icon in the notification area with icon and tooltip.
     unsafe { let _ = Shell_NotifyIconW(NIM_ADD, &nid); }
 
-    *TRAY_HWND.lock().unwrap() = Some(hwnd.0 as isize);
+    if let Ok(mut guard) = TRAY_HWND.lock() {
+        *guard = Some(hwnd.0 as isize);
+    }
 
     hwnd
 }
 
 pub fn destroy_tray() {
-    if let Ok(guard) = TRAY_HWND.lock() {
-        if let Some(hwnd) = *guard {
-            unsafe {
-                let hwnd = HWND(hwnd as *mut _);
-                remove_tray_icon(hwnd);
-                let _ = DestroyWindow(hwnd);
-            }
-        }
+    if let Ok(guard) = TRAY_HWND.lock()
+        && let Some(hwnd) = *guard
+    {
+        // SAFETY: hwnd is a valid window handle stored by create_tray_window().
+        let h = HWND(hwnd as *mut _);
+        remove_tray_icon(h);
+        // SAFETY: DestroyWindow destroys the tray window and sends WM_DESTROY which triggers cleanup.
+        unsafe { let _ = DestroyWindow(h); }
     }
 }
 
 pub fn signal_quit() {
     TRAY_EXIT.store(true, Ordering::SeqCst);
-    if let Ok(guard) = TRAY_HWND.lock() {
-        if let Some(hwnd) = *guard {
-            unsafe {
-                let hwnd = HWND(hwnd as *mut _);
-                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
-            }
-        }
+    if let Ok(guard) = TRAY_HWND.lock()
+        && let Some(hwnd) = *guard
+    {
+        // SAFETY: hwnd is a valid window handle from TRAY_HWND.
+        // PostMessageW sends WM_CLOSE which triggers the window to close and the message pump to exit.
+        unsafe { let _ = PostMessageW(HWND(hwnd as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0)); }
     }
 }
 
@@ -286,16 +316,18 @@ pub fn should_exit() -> bool {
 #[allow(dead_code)]
 pub fn find_daemon_hwnd() -> Option<isize> {
     let class_name = to_wstr("ZenScrollTray");
+    // SAFETY: FindWindowW searches for the "ZenScrollTray" window class created by the daemon.
     let hwnd = unsafe { FindWindowW(PCWSTR::from_raw(class_name.as_ptr()), None) };
-    if let Ok(h) = hwnd {
-        if h.0 != std::ptr::null_mut() { return Some(h.0 as isize); }
+    if let Ok(h) = hwnd
+        && !h.0.is_null()
+    {
+        return Some(h.0 as isize);
     }
     None
 }
 
 #[allow(dead_code)]
 pub fn signal_reload_to(hwnd: isize) {
-    unsafe {
-        let _ = PostMessageW(HWND(hwnd as *mut _), WM_APP, WPARAM(0), LPARAM(0));
-    }
+    // SAFETY: hwnd is a valid daemon tray window handle.
+    unsafe { let _ = PostMessageW(HWND(hwnd as *mut _), WM_APP, WPARAM(0), LPARAM(0)); }
 }

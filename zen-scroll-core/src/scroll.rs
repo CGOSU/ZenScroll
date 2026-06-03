@@ -97,16 +97,16 @@ impl Scroller {
 
         let mut active = false;
 
-        if self.axis.is_horizontal() {
-            if self.physics_x.update(&self.config, max_x, dt) {
-                active = true;
-            }
+        if self.axis.is_horizontal()
+            && self.physics_x.update(&self.config, max_x, dt)
+        {
+            active = true;
         }
 
-        if self.axis.is_vertical() {
-            if self.physics_y.update(&self.config, max_y, dt) {
-                active = true;
-            }
+        if self.axis.is_vertical()
+            && self.physics_y.update(&self.config, max_y, dt)
+        {
+            active = true;
         }
 
         active

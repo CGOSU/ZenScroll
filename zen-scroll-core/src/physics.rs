@@ -1,5 +1,6 @@
-use core::time::Duration;
 
+
+use core::time::Duration;
 #[derive(Debug, Clone)]
 pub struct ScrollConfig {
     pub friction: f64,
@@ -76,13 +77,19 @@ pub enum ScrollPhase {
     Bouncing,
 }
 
-impl PhysicsState {
-    pub fn new() -> Self {
+impl Default for PhysicsState {
+    fn default() -> Self {
         Self {
             offset: 0.0,
             velocity: 0.0,
             phase: ScrollPhase::Idle,
         }
+    }
+}
+
+impl PhysicsState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn update(&mut self, config: &ScrollConfig, max_offset: f64, dt: Duration) -> bool {

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[allow(clippy::upper_case_acronyms)]
 struct HWND(isize);
 
 const WM_APP: u32 = 0x8000;
@@ -44,6 +45,7 @@ fn daemon_class() -> Vec<u16> {
 
 fn find_daemon() -> HWND {
     let class = daemon_class();
+    // SAFETY: FindWindowW searches for the "ZenScrollTray" window class created by the daemon.
     unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) }
 }
 
@@ -69,6 +71,7 @@ fn launch_daemon() {
         .collect();
     let verb: Vec<u16> = "runas\0".encode_utf16().collect();
 
+    // SAFETY: ShellExecuteW("runas") launches zen-scroll-daemon.exe with admin privileges.
     unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -134,22 +137,23 @@ fn write_config(v: &serde_json::Value) {
 fn signal_daemon() {
     let hwnd = find_daemon();
     if hwnd.0 != 0 {
-        unsafe {
-            PostMessageW(hwnd, WM_APP, 0, 0);
-        }
+        // SAFETY: PostMessageW sends WM_APP to the daemon tray window, which triggers config reload.
+        unsafe { PostMessageW(hwnd, WM_APP, 0, 0); }
     }
 }
 
 fn set_window_icon() {
-    unsafe {
-        let hwnd = GetActiveWindow();
-        if hwnd.0 == 0 { return; }
-        let hmod = GetModuleHandleW(std::ptr::null());
-        let icon = LoadImageW(hmod, 1 as *const u16, 1, 32, 32, 0);
-        if icon != 0 {
-            PostMessageW(hwnd, 0x0080, 0, icon);
-            PostMessageW(hwnd, 0x0080, 1, icon);
-        }
+    // SAFETY: GetActiveWindow returns the active popup/overlapped window handle.
+    let hwnd = unsafe { GetActiveWindow() };
+    if hwnd.0 == 0 { return; }
+    // SAFETY: GetModuleHandleW(null) gets the current process module handle.
+    let hmod = unsafe { GetModuleHandleW(std::ptr::null()) };
+    // SAFETY: LoadImageW with RT_ICON type loads the embedded icon resource (ID=1) at 32x32.
+    let icon = unsafe { LoadImageW(hmod, std::ptr::from_ref(&1u16).cast(), 1, 32, 32, 0) };
+    if icon != 0 {
+        // SAFETY: PostMessageW with WM_SETICON sets the window icon for small (0) and big (1) sizes.
+        unsafe { PostMessageW(hwnd, 0x0080, 0, icon); }
+        unsafe { PostMessageW(hwnd, 0x0080, 1, icon); }
     }
 }
 const PRESET_NAMES: [&str; 3] = ["慢", "正常", "快"];

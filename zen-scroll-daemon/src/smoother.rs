@@ -101,9 +101,9 @@ impl SmoothInjector {
             };
 
             INJECTING.store(true, Ordering::SeqCst);
-            unsafe {
-                SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-            }
+            // SAFETY: SendInput injects a synthetic mouse wheel event into the system input stream.
+            // The INJECTING flag prevents the WH_MOUSE_LL hook from processing our own injected events.
+            unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32); }
             INJECTING.store(false, Ordering::SeqCst);
         }
 
