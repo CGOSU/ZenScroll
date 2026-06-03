@@ -17,6 +17,7 @@ pub struct SmoothInjector {
     active: bool,
     last_tick: Instant,
     last_scroll_time: Instant,
+    fraction: f64,
 }
 
 impl SmoothInjector {
@@ -28,6 +29,7 @@ impl SmoothInjector {
             active: false,
             last_tick: now,
             last_scroll_time: now,
+            fraction: 0.0,
         }
     }
 
@@ -59,8 +61,11 @@ impl SmoothInjector {
         self.velocity = self
             .velocity
             .clamp(-self.config.max_velocity, self.config.max_velocity);
+
+        if !self.active {
+            self.last_tick = now;
+        }
         self.active = true;
-        self.last_tick = now;
     }
 
     pub fn tick(&mut self) -> bool {
@@ -73,12 +78,15 @@ impl SmoothInjector {
         self.last_tick = now;
 
         let dt_ratio = dt.as_secs_f64() / TICK_INTERVAL.as_secs_f64();
-        let send = (self.velocity * dt_ratio) as i32;
+        let raw_send = self.velocity * dt_ratio + self.fraction;
+        let send = raw_send as i32;
+        self.fraction = raw_send - send as f64;
 
         self.velocity *= smartwheel_friction(&self.config, self.velocity);
 
         if self.velocity.abs() < self.config.min_velocity {
             self.velocity = 0.0;
+            self.fraction = 0.0;
             self.active = false;
             return false;
         }
@@ -113,6 +121,7 @@ impl SmoothInjector {
     #[allow(dead_code)]
     pub fn stop(&mut self) {
         self.velocity = 0.0;
+        self.fraction = 0.0;
         self.active = false;
     }
 }
