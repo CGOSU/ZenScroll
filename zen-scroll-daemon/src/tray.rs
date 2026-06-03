@@ -5,7 +5,7 @@ use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DefWindowProcW, DestroyWindow, SetForegroundWindow,
     TrackPopupMenu, AppendMenuW, CreateWindowExW, PostMessageW, DestroyMenu,
-    PostQuitMessage, GetCursorPos,
+    PostQuitMessage, GetCursorPos, FindWindowW,
     LookupIconIdFromDirectoryEx, CreateIconFromResourceEx,
     WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_CLOSE,
     WNDCLASSW, CW_USEDEFAULT, HICON, HCURSOR,
@@ -23,6 +23,7 @@ use windows::core::PCWSTR;
 
 use crate::config;
 use crate::hook;
+use crate::profile;
 
 const WM_TRAY_ICON: u32 = WM_APP + 1;
 const CMD_STATUS: u32 = 1000;
@@ -50,6 +51,7 @@ extern "system" fn tray_window_proc(
                     let mut cfg = config::load();
                     cfg.enabled = state.enabled;
                     config::save(&cfg);
+                    config::reload();
                 }
                 update_tray_tip(hwnd);
             }
@@ -70,6 +72,7 @@ extern "system" fn tray_window_proc(
                     let mut cfg = config::load();
                     cfg.enabled = state.enabled;
                     config::save(&cfg);
+                    config::reload();
                 }
                 update_tray_tip(hwnd);
             }
@@ -79,6 +82,20 @@ extern "system" fn tray_window_proc(
             }
             _ => {}
         }
+        return LRESULT(0);
+    }
+
+    if msg == WM_APP {
+        config::reload();
+        if let Ok(mut state) = hook::HOOK_STATE.lock() {
+            state.enabled = config::is_enabled();
+            let _ = state.injector.set_config(config::current_config());
+        }
+        if let Ok(guard) = config::DAEMON_CONFIG.lock() {
+            let _ = profile::apply_custom_profiles(&guard.custom_profiles);
+        }
+        eprintln!("[ZenScroll] Config reloaded via IPC");
+        update_tray_tip(hwnd);
         return LRESULT(0);
     }
 
@@ -233,4 +250,21 @@ pub fn signal_quit() {
 
 pub fn should_exit() -> bool {
     TRAY_EXIT.load(Ordering::SeqCst)
+}
+
+#[allow(dead_code)]
+pub fn find_daemon_hwnd() -> Option<isize> {
+    let class_name = to_wstr("ZenScrollTray");
+    let hwnd = unsafe { FindWindowW(PCWSTR::from_raw(class_name.as_ptr()), None) };
+    if let Ok(h) = hwnd {
+        if h.0 != std::ptr::null_mut() { return Some(h.0 as isize); }
+    }
+    None
+}
+
+#[allow(dead_code)]
+pub fn signal_reload_to(hwnd: isize) {
+    unsafe {
+        let _ = PostMessageW(HWND(hwnd as *mut _), WM_APP, WPARAM(0), LPARAM(0));
+    }
 }

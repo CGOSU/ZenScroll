@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "zen-scroll-core",
-    "gpui-demo",
+    "zen-scroll-ui",
     "zen-scroll-daemon",
 ]
 

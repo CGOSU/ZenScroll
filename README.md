@@ -13,17 +13,18 @@
 
 ```
 ZenScroll/
-├── zen-scroll-core/          # 物理引擎 + 插件系统（库）
-├── zen-scroll-daemon/        # 系统守护进程
+├── zen-scroll-core/          # 物理引擎（库）
+├── zen-scroll-daemon/        # 系统守护进程（需要管理员权限）
 │   ├── hook.rs               #   WH_MOUSE_LL 钩子安装与回调
 │   ├── detect.rs             #   前台进程识别（GetForegroundWindow）
 │   ├── smoother.rs           #   物理注入（SendInput 模拟硬件滚动）
-│   ├── profile.rs            #   内置预设 + 自定义配置合并
-│   ├── config.rs             #   配置持久化（%APPDATA%/ZenScroll/config.json）
+│   ├── profile.rs            #   内置应用匹配表 + 自定义覆盖
+│   ├── config.rs             #   配置持久化 + 全局配置静态 + IPC 重载
 │   ├── log.rs                #   调试日志（时间戳 + 运行时开关）
-│   ├── tray.rs               #   系统托盘图标
+│   ├── tray.rs               #   系统托盘图标 + WM_APP IPC 处理
 │   └── main.rs               #   入口 + 消息泵
-└── gpui-demo/                # GPU 加速参数调节面板
+└── zen-scroll-ui/            # 用户控制面板（GPU 加速，无权限要求）
+    └── main.rs               #   三档速度预设 + 配置文件读写 + 守护进程 IPC
 ```
 
 ### zen-scroll-core
@@ -47,21 +48,22 @@ Windows 系统级服务，工作在应用之外：
 1. **`hook.rs`** — `SetWindowsHookExW(WH_MOUSE_LL)` 安装全局低级别鼠标钩子，拦截原始滚动事件
 2. **`detect.rs`** — `GetForegroundWindow` → `GetWindowThreadProcessId` → `QueryFullProcessImageNameW` 识别前台进程名
 3. **`smoother.rs`** — `SmoothInjector` 将原始 120 刻度值转为指数衰减速度，通过 `SendInput` 以 8ms 间隔注入硬件级滚动（兼容 Chrome Raw Input）
-4. **`profile.rs`** — 内置 Chrome / Readest / Firefox 三套预设 + 从配置文件加载自定义覆盖
-5. **`config.rs`** — JSON 配置读写，位置 `%APPDATA%/ZenScroll/config.json`
+4. **`profile.rs`** — 内置 Chrome / Readest / Firefox 三组应用匹配规则 + 自定义进程名覆盖
+5. **`config.rs`** — JSON 配置读写 + 全局 `DAEMON_CONFIG` 静态 + `reload()` 运行时重载
 6. **`log.rs`** — 调试日志模块，运行时通过 `debug` 配置开关，输出带时间戳
-7. **`tray.rs`** — 系统托盘图标，左键开关、右键菜单（状态/Enable/Quit）
+7. **`tray.rs`** — 系统托盘图标 + `WM_APP` IPC 处理器（接收 UI 发来的配置重载信号）
 
 原理：拦截 → 吃掉原始事件(`LRESULT(1)`) → 计算平滑曲线 → 连续 `SendInput` 微量注入
 
-### gpui-demo
+### zen-scroll-ui
 
-基于 [gpui](https://github.com/zed-industries/gpui) 的 GPU 加速参数调节面板：
+基于 [gpui](https://github.com/zed-industries/gpui) 的 GPU 加速用户控制面板，用户主入口程序：
 
-- 三档预设切换（Chrome / Readest / Firefox）
-- 7 项物理参数实时调节（滑块 + 滚轮 + 按钮微调）
+- 三档全局速度预设：慢 / 正常 / 快
 - 启用/禁用开关
-- 底部状态栏显示当前配置
+- 读写 `%APPDATA%/ZenScroll/config.json`
+- 通过 `FindWindowW` + `PostMessageW(WM_APP)` 向守护进程发送配置重载信号
+- 守护进程收到信号后重新加载配置并更新运行状态
 
 ---
 
@@ -86,77 +88,66 @@ cargo run -r -p zen-scroll-daemon
 **控制面板**（无权限要求）：
 
 ```bash
-cargo run -r -p gpui-demo
-```
+cargo run -r -p zen-scroll-ui
 
-两个进程独立运行，互不依赖。控制面板可独立用作物理参数调谐器。
+控制面板读写同一份配置文件，并通过 `WM_APP` 窗口消息通知守护进程重载。
 
 ---
 
-## 内置预设
+## 内置应用匹配
 
-| 应用 | 摩擦力 (Friction) | Smart MIN | Smart MAX | 回弹力 (Bounce) | 加速度 (Accel) | 最大速度 (MaxV) | 最小速度 (MinV) | 匹配进程 |
-|------|------------------|-----------|-----------|-----------------|----------------|-----------------|-----------------|----------|
-| Chrome | 0.94 | 0.93 | 0.998 | 0.85 | 1.5 | 200 | 0.30 | chrome.exe, msedge.exe, brave.exe, opera.exe |
-| Readest | 0.96 | 0.95 | 0.999 | 0.90 | 1.0 | 120 | 0.20 | readest.exe |
-| Firefox | 0.93 | 0.92 | 0.998 | 0.85 | 1.3 | 180 | 0.40 | firefox.exe |
+| 应用 | 匹配进程 |
+|------|----------|
+| Chrome | chrome.exe, msedge.exe, brave.exe, opera.exe |
+| Readest | readest.exe |
+| Firefox | firefox.exe |
+
+> 物理参数由全局速度预设（慢/正常/快）决定，不再按应用区分。
 
 ## 自定义配置
 
-在 `%APPDATA%/ZenScroll/config.json` 中添加 `custom_profiles` 覆盖内置预设参数：
+在 `%APPDATA%/ZenScroll/config.json` 中可添加 `custom_profiles` 覆盖内置应用匹配规则，或修改 `speed_preset` 选择预设：
 
 ```json
 {
   "enabled": true,
+  "speed_preset": 1,
   "debug": false,
-  "selected_profile": "Chrome",
   "custom_profiles": [
     {
       "name": "Chrome",
-      "friction": 0.95,
-      "bounce_tension": 0.88,
-      "scroll_accel": 2.0,
-      "max_velocity": 250.0,
-      "min_velocity": 0.25,
-      "deceleration_rate": 0.998,
-      "max_bounce_distance": 150.0,
-      "smartwheel_friction_min": 0.94,
-      "smartwheel_friction_max": 0.998
+      "process_names": ["chrome.exe", "msedge.exe", "brave.exe"]
     }
   ]
 }
 ```
 
-- `enabled` — 守护进程启动时是否启用平滑滚动
+- `enabled` — 是否启用平滑滚动
+- `speed_preset` — 全局速度预设：`0`=慢, `1`=正常, `2`=快
 - `debug` — 设为 `true` 输出详细调试日志（含时间戳），默认关闭
-- `selected_profile` — 当前激活的预设名称
-- `custom_profiles` — 覆盖内置预设参数，`name` 必须匹配 Chrome / Readest / Firefox
+- `custom_profiles` — 覆盖内置应用匹配规则，`name` 必须匹配 Chrome / Readest / Firefox；`process_names` 为匹配的进程名列表
 
 ## 参数详解
 
-每个参数直接影响滚动手感，调试面板中可调节范围为下方括号值。
+每个参数直接影响滚动手感。`zen-scroll-ui` 控制面板将参数组合为"慢/正常/快"三档预设，如需微调单个参数，请直接编辑 `%APPDATA%/ZenScroll/config.json`（需修改 `PRESETS` 源码中的常数值）。下方括号内为各参数合理取值范围。
 
 ### 摩擦力 Friction `[0.80 — 0.99]`
 
-基准摩擦系数，仅在速度为零时生效（当 Smartwheel 机制激活时）。**值越大，总体滚动越滑、越持久**（如 0.96 的 Readest 预设手感绵长）；**值越小，滚动越"涩"、停得越快**。Smartwheel 开启后，动态摩擦力将在 `Smart MIN` ~ `Smart MAX` 之间插值，此参数不再直接参与每帧衰减。
-
-### Smart MIN 低速摩擦 `[0.80 — 0.99]`
-
-速度接近 0 时的摩擦系数。**值越小，低速时停得越快，段落感越强**——模拟棘轮啮合时的阻力。设到 0.90 以下时，每次滚动的最后几格有明显"卡顿"感，适合喜欢精确控制每格滚动的用户。
+基准摩擦系数，低速时速度为零附近的有效摩擦力。**值越大，总体滚动越滑、越持久**；**值越小，滚动越"涩"、停得越快**。Smartwheel 机制开启后，动态摩擦力将在 `Friction` ~ `Smart MAX` 之间插值。
 
 ### Smart MAX 高速摩擦 `[0.950 — 1.000]`
 
-速度达到 `Max Velocity` 时的摩擦系数。**值越大（越接近 1.0），高速滚动越接近无摩擦惯性滑行**——模拟棘轮脱开后的自由旋转。0.998 时快速甩滚轮可以飞很远，0.999 以上几乎不减速。
+速度达到 `Max Velocity` 时的摩擦系数。**值越大（越接近 1.0），高速滚动越接近无摩擦惯性滑行**——模拟棘轮脱开后的自由旋转。0.985 时快速甩滚轮可以飞很远，0.992 以上几乎不减速。
 
-**速度-摩擦力插值规则：**
+**速度-摩擦力插值规则（三次幂曲线）：**
 
 ```
 speed_ratio = |当前速度| / max_velocity
-friction    = SmartMIN + (SmartMAX - SmartMIN) × speed_ratio
+friction     = Friction + (SmartMAX - Friction) × speed_ratio³
 ```
 
-慢速 → 摩擦力 ≈ Smart MIN（阻尼大，棘轮感）
-快速 → 摩擦力 ≈ Smart MAX（阻尼小，自由滑行）
+慢速 → 摩擦力 ≈ `Friction`（阻尼大，棘轮感）  
+快速 → 摩擦力 ≈ `Smart MAX`（阻尼小，自由滑行）
 
 ### 回弹力 Bounce Tension `[0.50 — 1.00]`
 
@@ -176,17 +167,17 @@ friction    = SmartMIN + (SmartMAX - SmartMIN) × speed_ratio
 
 ## 推荐配置
 
-| 风格 | 摩擦力 | Smart MIN | Smart MAX | 回弹力 | 加速度 | 最大速度 | 最小速度 | 手感描述 |
-|------|--------|-----------|-----------|--------|--------|---------|---------|---------|
-| **慢速细腻** | 0.96 | 0.95 | 0.999 | 0.90 | 1.0 | 120 | 0.20 | 每格滚动精准，段落清晰，适合阅读/代码 |
-| **均衡** (Chrome 默认) | 0.94 | 0.93 | 0.998 | 0.85 | 1.5 | 200 | 0.30 | 慢速有阻尼感，快速能飞，日常浏览 |
-| **快速激进** | 0.92 | 0.90 | 0.998 | 0.80 | 2.0 | 300 | 0.50 | 起速快、高速持续久，适合长文档快速定位 |
+| 预设 | 摩擦力 | Smart MAX | 回弹力 | 加速度 | 最大速度 | 最小速度 | 手感描述 |
+|------|--------|-----------|--------|--------|---------|---------|---------|
+| **慢** | 0.92 | 0.97 | 0.90 | 0.8 | 80 | 0.30 | 每格滚动精准，段落清晰，适合阅读/代码 |
+| **正常** | 0.94 | 0.985 | 0.85 | 1.5 | 200 | 0.30 | 慢速有阻尼感，快速能飞，日常浏览首选 |
+| **快** | 0.95 | 0.992 | 0.80 | 2.5 | 350 | 0.50 | 起速快、高速持久，适合长文档快速定位 |
 
-> **慢速细腻**：低速时 Smart MIN=0.95 提供充足阻尼，每格滚动手感明确；高速时 Smart MAX=0.999 近乎无摩擦滑行，适合边读边滚的阅读场景。
+> **慢**：低速精确控制，整体偏紧较稳，适合需要逐行阅读的场景。
 >
-> **均衡**：Chrome 内置预设，低速摩擦 0.93 有恰到好处的段落感，高速 0.998 提供足够滑行距离，适应大多数场景。
+> **正常**：慢速恰到好处的段落感，高速足够滑行距离，适应大多数场景。
 >
-> **快速激进**：Smart MIN=0.90 段落感最弱，起速极快；加速度 2.0 让每格滚轮产生更大速度，适合需要频繁大范围跳转的长文档。
+> **快**：起速极快、高速持续久，适合频繁大范围跳转的长文档。
 
 ## 技术细节
 
@@ -198,12 +189,15 @@ friction    = SmartMIN + (SmartMAX - SmartMIN) × speed_ratio
 - 托盘图标内嵌于二进制（`include_bytes!`），运行时通过 `LookupIconIdFromDirectoryEx` + `CreateIconFromResourceEx` 加载
 - 配置持久化到 `%APPDATA%/ZenScroll/config.json`，使用 serde_json 序列化
 - 托盘图标切换时读取现有配置文件再修改，不会丢失 `custom_profiles` 和 `debug` 设置
+- `zen-scroll-ui` 通过 `FindWindowW("ZenScrollTray")` 定位守护进程窗口，发送 `WM_APP` 信号触发配置重载
+- 全局速度预设定义在 `zen-scroll-core/src/physics.rs` 中的 `PRESETS` 常量数组
+- `AppProfile` 不再携带物理参数，仅作为应用匹配规则；物理参数完全由 `speed_preset` 索引的全局预设决定
 
 ## 路线图
 
 - [ ] macOS 支持（`CGEventTap`）
 - [ ] Linux 支持（`libinput` / XInput）
-- [ ] 守护进程与控制面板间 IPC 通信
+- [x] 守护进程与控制面板间 IPC 通信（`WM_APP`）
 - [ ] 更多应用预设
 - [ ] 安装包（WiX / NSIS）
 

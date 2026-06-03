@@ -1,3 +1,4 @@
+use crate::config;
 use crate::debug_log;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -55,8 +56,8 @@ extern "system" fn low_level_mouse_proc(n_code: i32, w_param: WPARAM, l_param: L
 
                     if let Some(p) = profile {
                         if p.enabled {
-                            state.current_process = p.name.to_string();
-                            state.injector.set_config(p.config.clone());
+                            state.current_process = p.name.clone();
+                            state.injector.set_config(config::current_config());
                             state.injector.feed_wheel(raw_delta);
                             debug_log!(
                                 "Hook -> {} (delta={}, V={:.0})",
