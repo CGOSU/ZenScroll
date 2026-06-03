@@ -1,4 +1,3 @@
-#![windows_subsystem = "windows"]
 mod config;
 mod detect;
 mod hook;
@@ -89,7 +88,8 @@ fn main() {
     let _tray_hwnd = tray::create_tray_window();
 
     println!(
-        "[ZenScroll] 系统滚轮优化已启动 (启用={})",
+        "[ZenScroll v{}] 系统滚轮优化已启动 (启用={})",
+        env!("CARGO_PKG_VERSION"),
         config::is_enabled()
     );
     println!("[ZenScroll] 右键托盘图标控制");
