@@ -1,3 +1,4 @@
+﻿use std::os::windows::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM, HINSTANCE, POINT, BOOL};
@@ -7,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TrackPopupMenu, AppendMenuW, CreateWindowExW, PostMessageW, DestroyMenu,
     PostQuitMessage, GetCursorPos, FindWindowW,
     LookupIconIdFromDirectoryEx, CreateIconFromResourceEx,
-    WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_CLOSE,
+    WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_CLOSE, SW_SHOW,
     WNDCLASSW, CW_USEDEFAULT, HICON, HCURSOR,
     WINDOW_STYLE, WS_EX_TOOLWINDOW,
     TPM_LEFTALIGN, TPM_RIGHTBUTTON,
@@ -16,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NOTIFYICONDATAW, ShellExecuteW,
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
 };
 use windows::core::PCWSTR;
@@ -29,12 +30,36 @@ const WM_TRAY_ICON: u32 = WM_APP + 1;
 const CMD_STATUS: u32 = 1000;
 const CMD_TOGGLE: u32 = 1001;
 const CMD_QUIT: u32 = 1002;
+const CMD_LAUNCH_UI: u32 = 1003;
 
 static TRAY_HWND: Mutex<Option<isize>> = Mutex::new(None);
 static TRAY_EXIT: AtomicBool = AtomicBool::new(false);
 
 fn to_wstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn launch_ui() {
+    let exe = std::env::current_exe().ok();
+    let ui_path = exe.as_ref()
+        .and_then(|p| p.parent())
+        .map(|dir| dir.join("zen-scroll-ui.exe"));
+    let Some(path) = ui_path else { return };
+    if !path.exists() { return; }
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "open\0".encode_utf16().collect();
+
+    unsafe {
+        let _ = ShellExecuteW(
+            HWND(std::ptr::null_mut()),
+            PCWSTR::from_raw(verb.as_ptr()),
+            PCWSTR::from_raw(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOW,
+        );
+    }
 }
 
 extern "system" fn tray_window_proc(
@@ -76,6 +101,9 @@ extern "system" fn tray_window_proc(
                 }
                 update_tray_tip(hwnd);
             }
+            CMD_LAUNCH_UI => {
+                launch_ui();
+            }
             CMD_QUIT => {
                 TRAY_EXIT.store(true, Ordering::SeqCst);
                 unsafe { let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)); }
@@ -114,12 +142,15 @@ fn show_context_menu(hwnd: HWND) {
 
     let status_w = to_wstr(if enabled { " Running" } else { " Stopped" });
     let toggle_w = to_wstr(if enabled { "Disable" } else { "Enable" });
+    let launch_w = to_wstr("Control Panel");
     let quit_w = to_wstr("Quit");
 
     unsafe {
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_BYCOMMAND, CMD_STATUS as usize, PCWSTR::from_raw(status_w.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_TOGGLE as usize, PCWSTR::from_raw(toggle_w.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_LAUNCH_UI as usize, PCWSTR::from_raw(launch_w.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_QUIT as usize, PCWSTR::from_raw(quit_w.as_ptr()));
 

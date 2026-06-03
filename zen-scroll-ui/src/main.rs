@@ -1,6 +1,10 @@
-use gpui::*;
+﻿use gpui::*;
+use std::env;
 use std::fs;
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 #[repr(C)]
 struct HWND(isize);
@@ -10,10 +14,73 @@ const WM_APP: u32 = 0x8000;
 unsafe extern "system" {
     fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
     fn PostMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> i32;
+    fn ShellExecuteW(
+        hwnd: *mut std::ffi::c_void,
+        lpOperation: *const u16,
+        lpFile: *const u16,
+        lpParameters: *const u16,
+        lpDirectory: *const u16,
+        nShowCmd: i32,
+    ) -> isize;
+}
+
+fn daemon_class() -> Vec<u16> {
+    let mut s: Vec<u16> = "ZenScrollTray".encode_utf16().collect();
+    s.push(0);
+    s
+}
+
+fn find_daemon() -> HWND {
+    let class = daemon_class();
+    unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) }
+}
+
+fn daemon_is_running() -> bool {
+    find_daemon().0 != 0
+}
+
+fn launch_daemon() {
+    let exe = env::current_exe().ok();
+    let daemon_path = exe.as_ref()
+        .and_then(|p| p.parent())
+        .map(|dir| dir.join("zen-scroll-daemon.exe"));
+    let Some(path) = daemon_path else { return };
+    if !path.exists() { return; }
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            5,
+        );
+    }
+
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(200));
+        if daemon_is_running() {
+            thread::sleep(Duration::from_millis(500));
+            break;
+        }
+    }
+}
+
+fn ensure_daemon_running() {
+    if !daemon_is_running() {
+        launch_daemon();
+    }
+    if daemon_is_running() {
+        signal_daemon();
+    }
 }
 
 fn config_path() -> PathBuf {
-    let base = std::env::var("APPDATA")
+    let base = env::var("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     base.join("ZenScroll").join("config.json")
@@ -46,11 +113,9 @@ fn write_config(v: &serde_json::Value) {
 }
 
 fn signal_daemon() {
-    let mut class: Vec<u16> = "ZenScrollTray".encode_utf16().collect();
-    class.push(0);
-    unsafe {
-        let hwnd = FindWindowW(class.as_ptr(), std::ptr::null());
-        if hwnd.0 != 0 {
+    let hwnd = find_daemon();
+    if hwnd.0 != 0 {
+        unsafe {
             PostMessageW(hwnd, WM_APP, 0, 0);
         }
     }
@@ -236,6 +301,7 @@ impl ConfigPanel {
 }
 
 fn main() {
+    ensure_daemon_running();
     Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(320.0), px(420.0)), cx);
         cx.open_window(
