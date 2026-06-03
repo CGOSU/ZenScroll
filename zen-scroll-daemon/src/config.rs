@@ -14,6 +14,7 @@ pub struct ProfileConfig {
     pub min_velocity: f64,
     pub deceleration_rate: f64,
     pub max_bounce_distance: f64,
+    pub smartwheel_friction_max: f64,
 }
 
 impl From<&ProfileConfig> for ScrollConfig {
@@ -26,6 +27,7 @@ impl From<&ProfileConfig> for ScrollConfig {
             min_velocity: p.min_velocity,
             deceleration_rate: p.deceleration_rate,
             max_bounce_distance: p.max_bounce_distance,
+            smartwheel_friction_max: p.smartwheel_friction_max,
         }
     }
 }
@@ -41,6 +43,7 @@ impl From<&ScrollConfig> for ProfileConfig {
             min_velocity: c.min_velocity,
             deceleration_rate: c.deceleration_rate,
             max_bounce_distance: c.max_bounce_distance,
+            smartwheel_friction_max: c.smartwheel_friction_max,
         }
     }
 }

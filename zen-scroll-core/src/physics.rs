@@ -9,6 +9,7 @@ pub struct ScrollConfig {
     pub scroll_accel: f64,
     pub deceleration_rate: f64,
     pub max_bounce_distance: f64,
+    pub smartwheel_friction_max: f64,
 }
 
 impl Default for ScrollConfig {
@@ -21,6 +22,7 @@ impl Default for ScrollConfig {
             scroll_accel: 1.2,
             deceleration_rate: 0.998,
             max_bounce_distance: 150.0,
+            smartwheel_friction_max: 0.985,
         }
     }
 }
@@ -113,5 +115,31 @@ impl PhysicsState {
 
     pub fn is_moving(&self) -> bool {
         self.velocity.abs() > 0.0 || self.phase != ScrollPhase::Idle
+    }
+}
+
+pub fn smartwheel_friction(config: &ScrollConfig, velocity: f64) -> f64 {
+    let speed_ratio = (velocity.abs() / config.max_velocity).clamp(0.0, 1.0);
+    let weight = speed_ratio.powi(3);
+    config.friction
+        + (config.smartwheel_friction_max - config.friction) * weight
+}
+
+/// Maps the time between scroll events to a velocity multiplier.
+/// Fast scrolling (short interval) → higher factor → longer jump per notch.
+/// Slow scrolling (long interval) → lower factor → precise short jump.
+pub fn adaptive_scroll_factor(interval_ms: f64) -> f64 {
+    const FAST_MS: f64 = 30.0;
+    const SLOW_MS: f64 = 300.0;
+    const MIN_FACTOR: f64 = 0.3;
+    const MAX_FACTOR: f64 = 3.0;
+
+    if interval_ms >= SLOW_MS {
+        MIN_FACTOR
+    } else if interval_ms <= FAST_MS {
+        MAX_FACTOR
+    } else {
+        let t = (interval_ms - FAST_MS) / (SLOW_MS - FAST_MS);
+        MAX_FACTOR + (MIN_FACTOR - MAX_FACTOR) * t
     }
 }

@@ -4,7 +4,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSE_EVENT_FLAGS,
 };
 
-use zen_scroll_core::physics::ScrollConfig;
+use zen_scroll_core::physics::{adaptive_scroll_factor, smartwheel_friction, ScrollConfig};
 
 const WHEEL_DELTA: i32 = 120;
 const TICK_INTERVAL: Duration = Duration::from_millis(8);
@@ -16,15 +16,18 @@ pub struct SmoothInjector {
     config: ScrollConfig,
     active: bool,
     last_tick: Instant,
+    last_scroll_time: Instant,
 }
 
 impl SmoothInjector {
     pub fn new(config: ScrollConfig) -> Self {
+        let now = Instant::now();
         Self {
             velocity: 0.0,
             config,
             active: false,
-            last_tick: Instant::now(),
+            last_tick: now,
+            last_scroll_time: now,
         }
     }
 
@@ -42,13 +45,22 @@ impl SmoothInjector {
     }
 
     pub fn feed_wheel(&mut self, raw_delta: i32) {
-        let v = raw_delta as f64 * self.config.scroll_accel;
+        let now = Instant::now();
+        let factor = if self.active {
+            let interval = now.duration_since(self.last_scroll_time).as_secs_f64() * 1000.0;
+            adaptive_scroll_factor(interval)
+        } else {
+            0.5
+        };
+        self.last_scroll_time = now;
+
+        let v = raw_delta as f64 * self.config.scroll_accel * factor;
         self.velocity += v;
         self.velocity = self
             .velocity
             .clamp(-self.config.max_velocity, self.config.max_velocity);
         self.active = true;
-        self.last_tick = Instant::now();
+        self.last_tick = now;
     }
 
     pub fn tick(&mut self) -> bool {
@@ -63,7 +75,7 @@ impl SmoothInjector {
         let dt_ratio = dt.as_secs_f64() / TICK_INTERVAL.as_secs_f64();
         let send = (self.velocity * dt_ratio) as i32;
 
-        self.velocity *= self.config.friction;
+        self.velocity *= smartwheel_friction(&self.config, self.velocity);
 
         if self.velocity.abs() < self.config.min_velocity {
             self.velocity = 0.0;

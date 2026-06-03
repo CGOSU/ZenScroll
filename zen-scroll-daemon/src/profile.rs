@@ -22,6 +22,7 @@ pub static BUILTIN_PROFILES: std::sync::LazyLock<Mutex<Vec<AppProfile>>> =
             scroll_accel: 1.5,
             deceleration_rate: 0.998,
             max_bounce_distance: 150.0,
+            smartwheel_friction_max: 0.985,
         },
         enabled: true,
     },
@@ -36,6 +37,7 @@ pub static BUILTIN_PROFILES: std::sync::LazyLock<Mutex<Vec<AppProfile>>> =
             scroll_accel: 1.0,
             deceleration_rate: 0.999,
             max_bounce_distance: 80.0,
+            smartwheel_friction_max: 0.990,
         },
         enabled: true,
     },
@@ -50,6 +52,7 @@ pub static BUILTIN_PROFILES: std::sync::LazyLock<Mutex<Vec<AppProfile>>> =
             scroll_accel: 1.3,
             deceleration_rate: 0.998,
             max_bounce_distance: 150.0,
+            smartwheel_friction_max: 0.985,
         },
         enabled: true,
     },
@@ -70,9 +73,10 @@ pub fn apply_custom_profiles(profiles: &[crate::config::ProfileConfig]) {
         for custom in profiles {
             if let Some(builtin) = guard.iter_mut().find(|p| p.name == custom.name) {
                 builtin.config = ScrollConfig::from(custom);
-                eprintln!("[ZenScroll] Override profile: {} (μ={} ξ={} a={} V={} v={})",
+                eprintln!("[ZenScroll] Override profile: {} (μ={} ξ={} a={} V={} v={} sm_max={})",
                     custom.name, custom.friction, custom.bounce_tension,
-                    custom.scroll_accel, custom.max_velocity, custom.min_velocity);
+                    custom.scroll_accel, custom.max_velocity, custom.min_velocity,
+                    custom.smartwheel_friction_max);
             } else {
                 eprintln!("[ZenScroll] Custom profile '{}' does not match any built-in, ignored", custom.name);
             }

@@ -28,23 +28,24 @@ impl SliderParam {
 
 struct AppProfile {
     name: &'static str,
-    vals: [f64; 5],
+    vals: [f64; 6],
 }
 
 static PROFILES: &[AppProfile] = &[
-    AppProfile { name: "Chrome",  vals: [0.94, 0.85, 1.5, 200.0, 0.30] },
-    AppProfile { name: "Readest", vals: [0.96, 0.90, 1.0, 120.0, 0.20] },
-    AppProfile { name: "Firefox", vals: [0.93, 0.85, 1.3, 180.0, 0.40] },
+    AppProfile { name: "Chrome",  vals: [0.94, 0.998, 0.85, 1.5, 200.0, 0.30] },
+    AppProfile { name: "Readest", vals: [0.96, 0.999, 0.90, 1.0, 120.0, 0.20] },
+    AppProfile { name: "Firefox", vals: [0.93, 0.998, 0.85, 1.3, 180.0, 0.40] },
 ];
 
 struct ConfigPanel {
     selected: usize,
     enabled: bool,
-    sliders: [SliderParam; 5],
+    sliders: [SliderParam; 6],
 }
 
-const SLIDER_DEFS: [(&str, f64, f64, f64); 5] = [
+const SLIDER_DEFS: [(&str, f64, f64, f64); 6] = [
     ("摩擦力 Friction",      0.80, 0.99, 0.01),
+    ("Smart MAX 高速摩擦",   0.95, 1.00, 0.001),
     ("回弹力 Bounce",        0.50, 1.00, 0.01),
     ("加速度 Accel",         0.10, 3.00, 0.10),
     ("最大速度 MaxV",        30.0, 400., 5.00),
@@ -61,15 +62,16 @@ impl ConfigPanel {
         }
     }
 
-    fn make_sliders(vals: &[f64; 5]) -> [SliderParam; 5] {
+    fn make_sliders(vals: &[f64; 6]) -> [SliderParam; 6] {
         let mut s = [
             SliderParam::new("", 0.0, 0.0, 0.0, 0.0),
             SliderParam::new("", 0.0, 0.0, 0.0, 0.0),
             SliderParam::new("", 0.0, 0.0, 0.0, 0.0),
             SliderParam::new("", 0.0, 0.0, 0.0, 0.0),
             SliderParam::new("", 0.0, 0.0, 0.0, 0.0),
+            SliderParam::new("", 0.0, 0.0, 0.0, 0.0),
         ];
-        for i in 0..5 {
+        for i in 0..6 {
             let (label, lo, hi, step) = SLIDER_DEFS[i];
             s[i] = SliderParam::new(label, vals[i], lo, hi, step);
         }
@@ -86,10 +88,11 @@ impl ConfigPanel {
     fn current_config(&self) -> ScrollConfig {
         ScrollConfig {
             friction: self.sliders[0].value,
-            bounce_tension: self.sliders[1].value,
-            scroll_accel: self.sliders[2].value,
-            max_velocity: self.sliders[3].value,
-            min_velocity: self.sliders[4].value,
+            smartwheel_friction_max: self.sliders[1].value,
+            bounce_tension: self.sliders[2].value,
+            scroll_accel: self.sliders[3].value,
+            max_velocity: self.sliders[4].value,
+            min_velocity: self.sliders[5].value,
             ..Default::default()
         }
     }
@@ -294,8 +297,9 @@ impl ConfigPanel {
             )
             .child(
                 div().text_color(rgb(0x666688)).text_xs()
-                    .child(format!("μ={:.2} ξ={:.2} a={:.1} V={:.0} v={:.2}",
-                        c.friction, c.bounce_tension, c.scroll_accel, c.max_velocity, c.min_velocity)),
+                    .child(format!("μ={:.2} sm={:.3} ξ={:.2} a={:.1} V={:.0} v={:.2}",
+                        c.friction, c.smartwheel_friction_max,
+                        c.bounce_tension, c.scroll_accel, c.max_velocity, c.min_velocity)),
             )
     }
 }
