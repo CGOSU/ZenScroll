@@ -1,4 +1,5 @@
-﻿use gpui::*;
+﻿#![windows_subsystem = "windows"]
+use gpui::*;
 use std::env;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
@@ -41,13 +42,20 @@ fn daemon_is_running() -> bool {
 
 fn launch_daemon() {
     let exe = env::current_exe().ok();
-    let daemon_path = exe.as_ref()
+    let daemon_path = exe
+        .as_ref()
         .and_then(|p| p.parent())
         .map(|dir| dir.join("zen-scroll-daemon.exe"));
     let Some(path) = daemon_path else { return };
-    if !path.exists() { return; }
+    if !path.exists() {
+        return;
+    }
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let verb: Vec<u16> = "runas\0".encode_utf16().collect();
 
     unsafe {
@@ -181,18 +189,31 @@ impl ConfigPanel {
                     .gap_2()
                     .child(
                         div()
-                            .w(px(10.0)).h(px(10.0)).rounded_full()
-                            .bg(if self.enabled { rgb(0x44ff88) } else { rgb(0x555555) }),
+                            .w(px(10.0))
+                            .h(px(10.0))
+                            .rounded_full()
+                            .bg(if self.enabled {
+                                rgb(0x44ff88)
+                            } else {
+                                rgb(0x555555)
+                            }),
                     )
                     .child(
                         div()
-                            .text_color(rgb(0x88ccff)).font_weight(FontWeight(700.0)).text_lg()
+                            .text_color(rgb(0x88ccff))
+                            .font_weight(FontWeight(700.0))
+                            .text_lg()
                             .child("ZenScroll"),
                     ),
             )
             .child(
                 div()
-                    .text_color(if self.enabled { rgb(0x44ff88) } else { rgb(0x555555) }).text_sm()
+                    .text_color(if self.enabled {
+                        rgb(0x44ff88)
+                    } else {
+                        rgb(0x555555)
+                    })
+                    .text_sm()
                     .child(if self.enabled {
                         format!("{} · 运行中", PRESET_NAMES[self.selected])
                     } else {
@@ -226,11 +247,19 @@ impl ConfigPanel {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(0x0f3460)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
-                        this.selected = i;
-                        this.save_and_signal();
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(
+                            move |this: &mut Self,
+                                  _: &MouseDownEvent,
+                                  _: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.selected = i;
+                                this.save_and_signal();
+                                cx.notify();
+                            },
+                        ),
+                    )
                     .child(
                         div()
                             .text_color(if is_sel { rgb(0x88ccff) } else { rgb(0x666688) })
@@ -255,20 +284,36 @@ impl ConfigPanel {
             .justify_center()
             .gap_3()
             .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
-                this.enabled = !this.enabled;
-                this.save_and_signal();
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(
+                    |this: &mut Self,
+                     _: &MouseDownEvent,
+                     _: &mut Window,
+                     cx: &mut Context<Self>| {
+                        this.enabled = !this.enabled;
+                        this.save_and_signal();
+                        cx.notify();
+                    },
+                ),
+            )
             .child(
                 div()
-                    .w(px(44.0)).h(px(24.0))
-                    .bg(if self.enabled { rgb(0x44ff88) } else { rgb(0x444444) })
+                    .w(px(44.0))
+                    .h(px(24.0))
+                    .bg(if self.enabled {
+                        rgb(0x44ff88)
+                    } else {
+                        rgb(0x444444)
+                    })
                     .rounded_full()
                     .relative()
                     .child(
                         div()
-                            .w(px(20.0)).h(px(20.0)).rounded_full().bg(rgb(0xffffff))
+                            .w(px(20.0))
+                            .h(px(20.0))
+                            .rounded_full()
+                            .bg(rgb(0xffffff))
                             .absolute()
                             .left(if self.enabled { px(22.0) } else { px(2.0) })
                             .top(px(2.0)),
@@ -276,8 +321,17 @@ impl ConfigPanel {
             )
             .child(
                 div()
-                    .text_color(if self.enabled { rgb(0x44ff88) } else { rgb(0x888888) }).text_sm()
-                    .child(if self.enabled { "已启用" } else { "已禁用" }),
+                    .text_color(if self.enabled {
+                        rgb(0x44ff88)
+                    } else {
+                        rgb(0x888888)
+                    })
+                    .text_sm()
+                    .child(if self.enabled {
+                        "已启用"
+                    } else {
+                        "已禁用"
+                    }),
             )
     }
 
@@ -290,13 +344,15 @@ impl ConfigPanel {
             .items_center()
             .justify_center()
             .px_4()
-            .child(
-                div()
-                    .text_color(rgb(0x555577)).text_xs()
-                    .child(format!("μ={:.2} sm={:.3} ξ={:.2} a={:.1} V={:.0} v={:.2}",
-                        c.friction, c.smartwheel_friction_max,
-                        c.bounce_tension, c.scroll_accel, c.max_velocity, c.min_velocity)),
-            )
+            .child(div().text_color(rgb(0x555577)).text_xs().child(format!(
+                "μ={:.2} sm={:.3} ξ={:.2} a={:.1} V={:.0} v={:.2}",
+                c.friction,
+                c.smartwheel_friction_max,
+                c.bounce_tension,
+                c.scroll_accel,
+                c.max_velocity,
+                c.min_velocity
+            )))
     }
 }
 
@@ -315,3 +371,4 @@ fn main() {
         cx.activate(true);
     });
 }
+
