@@ -65,17 +65,17 @@ extern "system" fn low_level_mouse_proc(n_code: i32, w_param: WPARAM, l_param: L
                         state.injector.set_config(config::current_config());
                         state.injector.feed_wheel(raw_delta);
                         debug_log!(
-                            "Hook -> {} (delta={}, V={:.0})",
+                            "钩子 -> {} (增量={}, 速度={:.0})",
                             p.name,
                             raw_delta,
                             state.injector.velocity()
                         );
                         return LRESULT(1);
                     } else {
-                        debug_log!("{} matched but DISABLED", target.process_name);
+                        debug_log!("{} 已匹配但已禁用", target.process_name);
                     }
                 } else {
-                    debug_log!("No profile for: {}", target.process_name);
+                    debug_log!("无匹配配置: {}", target.process_name);
                 }
             }
         }
@@ -105,7 +105,7 @@ pub fn uninstall_hook() {
     {
         // SAFETY: raw is a valid HHOOK handle stored by install_hook. UnhookWindowsHookEx removes the hook.
         unsafe { let _ = UnhookWindowsHookEx(HHOOK(raw as *mut _)); }
-        eprintln!("[ZenScroll] Hook uninstalled");
+        eprintln!("[ZenScroll] 钩子已卸载");
     }
 }
 

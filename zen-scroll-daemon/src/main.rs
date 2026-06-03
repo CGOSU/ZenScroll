@@ -32,7 +32,7 @@ fn save_and_override_scroll_lines() {
     if ok {
         ORIGINAL_SCROLL_LINES.store(lines, Ordering::SeqCst);
         if lines == WHEEL_PAGESCROLL {
-            eprintln!("[ZenScroll] System scroll was 'one page', overriding to 1 line");
+            eprintln!("[ZenScroll] 系统滚轮为'翻页'模式，已覆盖为 1 行");
             let val: u32 = 1;
             let ptr = &val as *const u32 as *mut core::ffi::c_void;
             // SAFETY: SystemParametersInfoW sets the wheel scroll lines to 1. ptr is a valid u32.
@@ -40,7 +40,7 @@ fn save_and_override_scroll_lines() {
                 SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 1, Some(ptr), SPIF_UPDATEINIFILE)
             };
         } else {
-            eprintln!("[ZenScroll] System scroll lines = {}, keeping as-is", lines);
+            eprintln!("[ZenScroll] 系统滚轮行数 = {}，保持不变", lines);
         }
     }
 }
@@ -55,7 +55,7 @@ fn restore_scroll_lines() {
             let _ =
                 SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 0, Some(ptr), SPIF_UPDATEINIFILE);
         }
-        eprintln!("[ZenScroll] Restored system scroll to 'one page'");
+        eprintln!("[ZenScroll] 已恢复系统滚轮为'翻页'模式");
     }
 }
 
@@ -67,7 +67,7 @@ fn main() {
         log::set_debug(cfg.debug);
         if !cfg.custom_profiles.is_empty() {
             eprintln!(
-                "[ZenScroll] Loaded {} custom profiles",
+                "[ZenScroll] 已加载 {} 个自定义配置",
                 cfg.custom_profiles.len()
             );
             profile::apply_custom_profiles(&cfg.custom_profiles);
@@ -75,7 +75,7 @@ fn main() {
     }
 
     if let Err(e) = hook::install_hook() {
-        eprintln!("[ZenScroll] Failed to install hook: {}", e);
+        eprintln!("[ZenScroll] 安装钩子失败: {}", e);
         restore_scroll_lines();
         return;
     }
@@ -89,20 +89,20 @@ fn main() {
     let _tray_hwnd = tray::create_tray_window();
 
     println!(
-        "[ZenScroll] System scroll optimizer started (enabled={})",
+        "[ZenScroll] 系统滚轮优化已启动 (启用={})",
         config::is_enabled()
     );
-    println!("[ZenScroll] Right-click tray icon to control");
+    println!("[ZenScroll] 右键托盘图标控制");
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
     ctrlc::set_handler(move || {
-        println!("\n[ZenScroll] Shutting down...");
+        println!("\n[ZenScroll] 正在关闭...");
         r.store(false, Ordering::SeqCst);
         tray::signal_quit();
     })
-    .expect("Failed to set Ctrl+C handler");
+    .expect("设置 Ctrl+C 处理器失败");
 
     let inject_handle = thread::spawn(move || {
         injection_loop();

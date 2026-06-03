@@ -44,16 +44,16 @@ pub fn load() -> DaemonConfig {
     match fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<DaemonConfig>(&content) {
             Ok(cfg) => {
-                eprintln!("[ZenScroll] Config loaded from {:?}", path);
+                eprintln!("[ZenScroll] 配置已加载: {:?}", path);
                 cfg
             }
             Err(e) => {
-                eprintln!("[ZenScroll] Config parse error: {}, using defaults", e);
+                eprintln!("[ZenScroll] 配置解析错误: {}，使用默认值", e);
                 DaemonConfig::default()
             }
         },
         Err(_) => {
-            eprintln!("[ZenScroll] No config file at {:?}, using defaults", path);
+            eprintln!("[ZenScroll] 无配置文件: {:?}，使用默认值", path);
             DaemonConfig::default()
         }
     }
@@ -69,19 +69,19 @@ pub fn reload() {
 pub fn save(cfg: &DaemonConfig) {
     let dir = config_dir();
     if let Err(e) = fs::create_dir_all(&dir) {
-        eprintln!("[ZenScroll] Failed to create config dir: {}", e);
+        eprintln!("[ZenScroll] 创建配置目录失败: {}", e);
         return;
     }
     let path = config_path();
     match serde_json::to_string_pretty(cfg) {
         Ok(content) => {
             if let Err(e) = fs::write(&path, &content) {
-                eprintln!("[ZenScroll] Failed to write config: {}", e);
+                eprintln!("[ZenScroll] 写入配置失败: {}", e);
             } else {
-                eprintln!("[ZenScroll] Config saved to {:?}", path);
+                eprintln!("[ZenScroll] 配置已保存: {:?}", path);
             }
         }
-        Err(e) => eprintln!("[ZenScroll] Config serialize error: {}", e),
+        Err(e) => eprintln!("[ZenScroll] 配置序列化错误: {}", e),
     }
 }
 

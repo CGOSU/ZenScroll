@@ -41,10 +41,10 @@ pub fn apply_custom_profiles(profiles: &[crate::config::ProfileConfig]) {
                 if !custom.process_names.is_empty() {
                     builtin.process_names = custom.process_names.clone();
                 }
-                eprintln!("[ZenScroll] Custom profile '{}' updated with {} process(es)",
+                eprintln!("[ZenScroll] 自定义配置 '{}' 已更新，{} 个进程",
                     custom.name, builtin.process_names.len());
             } else {
-                eprintln!("[ZenScroll] Custom profile '{}' does not match any built-in, ignored", custom.name);
+                eprintln!("[ZenScroll] 自定义配置 '{}' 不匹配任何内置配置，已忽略", custom.name);
             }
         }
     }

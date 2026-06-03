@@ -124,7 +124,7 @@ extern "system" fn tray_window_proc(
         if let Ok(guard) = config::DAEMON_CONFIG.lock() {
             profile::apply_custom_profiles(&guard.custom_profiles);
         }
-        eprintln!("[ZenScroll] Config reloaded via IPC");
+        eprintln!("[ZenScroll] IPC 配置已重载");
         update_tray_tip(hwnd);
         return LRESULT(0);
     }
@@ -146,10 +146,10 @@ fn show_context_menu(hwnd: HWND) {
     let Ok(menu) = menu else { return };
     let enabled = hook::HOOK_STATE.lock().map(|s| s.enabled).unwrap_or(true);
 
-    let status_w = to_wstr(if enabled { " Running" } else { " Stopped" });
-    let toggle_w = to_wstr(if enabled { "Disable" } else { "Enable" });
-    let launch_w = to_wstr("Control Panel");
-    let quit_w = to_wstr("Quit");
+    let status_w = to_wstr(if enabled { " 运行中" } else { " 已停止" });
+    let toggle_w = to_wstr(if enabled { "禁用" } else { "启用" });
+    let launch_w = to_wstr("控制面板");
+    let quit_w = to_wstr("退出");
 
     // SAFETY: Context menu lifecycle: AppendMenuW populates the menu, GetCursorPos retrieves cursor
     // position for placement, SetForegroundWindow ensures proper menu dismissal on click-away,
@@ -186,9 +186,9 @@ fn update_tray_tip(hwnd: HWND) {
     let enabled = hook::HOOK_STATE.lock().map(|s| s.enabled).unwrap_or(true);
     let proc_name = hook::HOOK_STATE.lock().map(|s| s.current_process.clone()).unwrap_or_default();
     let tip = if proc_name.is_empty() {
-        format!("ZenScroll [{}]", if enabled { "Running" } else { "Stopped" })
+        format!("ZenScroll [{}]", if enabled { "运行中" } else { "已停止" })
     } else {
-        format!("ZenScroll [{}] - {}", if enabled { "Running" } else { "Stopped" }, proc_name)
+        format!("ZenScroll [{}] - {}", if enabled { "运行中" } else { "已停止" }, proc_name)
     };
 
     let tip_wide = to_wstr(&tip);
@@ -241,7 +241,7 @@ pub fn create_tray_window() -> HWND {
     } {
         Ok(h) => h,
         Err(_) => {
-            eprintln!("[ZenScroll] Failed to create tray window");
+            eprintln!("[ZenScroll] 创建托盘窗口失败");
             return HWND(std::ptr::null_mut());
         }
     };

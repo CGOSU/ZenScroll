@@ -13,25 +13,25 @@ impl TargetWindow {
         let hwnd = unsafe { GetForegroundWindow() };
 
         if hwnd.is_invalid() {
-            debug_log!("detect: GetForegroundWindow = INVALID");
+            debug_log!("检测: GetForegroundWindow 无效");
             return None;
         }
-        debug_log!("detect: foreground HWND = {:?}", hwnd);
+        debug_log!("检测: 前台窗口句柄 = {:?}", hwnd);
 
         let mut pid: u32 = 0;
         // SAFETY: hwnd is from GetForegroundWindow. GetWindowThreadProcessId writes the PID into pid.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
         if pid == 0 {
-            debug_log!("detect: GetWindowThreadProcessId = 0");
+            debug_log!("检测: GetWindowThreadProcessId = 0");
             return None;
         }
-        debug_log!("detect: PID={}", pid);
+        debug_log!("检测: PID={}", pid);
 
         let process_name = get_process_name(pid).unwrap_or_else(|| {
-            debug_log!("detect: get_process_name({}) FAILED", pid);
+            debug_log!("检测: get_process_name({}) 失败", pid);
             "unknown".into()
         });
-        debug_log!("detect: process_name='{}'", process_name);
+        debug_log!("检测: 进程名='{}'", process_name);
 
         Some(Self {
             hwnd: hwnd.0 as isize,
@@ -48,21 +48,21 @@ fn get_process_name(pid: u32) -> Option<String> {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    debug_log!("detect: calling OpenProcess({})", pid);
+    debug_log!("检测: 调用 OpenProcess({})", pid);
     // SAFETY: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION opens a handle for querying the process name.
     let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => h,
         Err(e) => {
-            debug_log!("detect: OpenProcess({}) failed: {:?}", pid, e);
+            debug_log!("检测: OpenProcess({}) 失败: {:?}", pid, e);
             return None;
         }
     };
-    debug_log!("detect: OpenProcess OK");
+    debug_log!("检测: OpenProcess 成功");
 
     let mut buf = vec![0u16; 4096];
     let mut size = buf.len() as u32;
 
-    debug_log!("detect: calling QueryFullProcessImageNameW(..., WIN32, ...)");
+    debug_log!("检测: 调用 QueryFullProcessImageNameW(..., WIN32, ...)");
     // SAFETY: handle is from OpenProcess. buf has 4096 elements which is sufficient for a Win32 path.
     // PROCESS_NAME_FORMAT(0) = WIN32 format. size is in/out parameter populated by the kernel.
     let result = unsafe {
@@ -78,17 +78,17 @@ fn get_process_name(pid: u32) -> Option<String> {
         let name = OsString::from_wide(&buf[..size as usize])
             .to_string_lossy()
             .into_owned();
-        debug_log!("detect: full path = '{}'", name);
+        debug_log!("检测: 完整路径 = '{}'", name);
         let exe = std::path::Path::new(&name)
             .file_name()?
             .to_string_lossy()
             .into_owned();
-        debug_log!("detect: exe = '{}'", exe);
+        debug_log!("检测: exe = '{}'", exe);
         Some(exe)
     } else {
         // SAFETY: GetLastError retrieves the calling thread's last-error code after QueryFullProcessImageNameW failed.
         let err = unsafe { windows::Win32::Foundation::GetLastError() };
-        debug_log!("detect: QueryFullProcessImageNameW failed, GetLastError={}", err.0);
+        debug_log!("检测: QueryFullProcessImageNameW 失败, GetLastError={}", err.0);
         None
     }
 }
