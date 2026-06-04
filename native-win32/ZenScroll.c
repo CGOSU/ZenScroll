@@ -19,6 +19,7 @@
 #define CMD_TOGGLE 1001
 #define CMD_SHOW_UI 1002
 #define CMD_QUIT 1003
+#define CMD_AUTOSTART 1004
 #define ID_BTN_TOGGLE 2001
 #define ID_BTN_SLOW 2002
 #define ID_BTN_NORMAL 2003
@@ -26,6 +27,8 @@
 #define ID_TXT_STATUS 2005
 #define WHEEL_DELTA_ZEN 120
 #define TICK_MS 8
+#define LVM_FIRST 0x1000
+#define LVM_SCROLL (LVM_FIRST + 20)
 
 typedef struct ScrollConfig {
     double friction;
@@ -55,8 +58,10 @@ static ULONGLONG g_last_tick = 0;
 static ULONGLONG g_last_scroll_time = 0;
 static HWND g_scroll_hwnd = NULL;
 static POINT g_scroll_pt = {0, 0};
+static bool g_scroll_explorer = false;
 static int g_speed_preset = 1;
 static UINT g_original_scroll_lines = 3;
+static bool g_autostart = false;
 
 static void lower_working_set(void) {
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
@@ -69,6 +74,80 @@ static void config_path(wchar_t *out, DWORD cap) {
         GetCurrentDirectoryW((DWORD)(sizeof(base) / sizeof(base[0])), base);
     }
     swprintf(out, cap, L"%ls\\ZenScroll\\config.json", base);
+}
+
+static void autostart_reg_path(wchar_t *out, DWORD cap) {
+    (void)cap;
+    wcscpy(out, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+}
+
+static bool run_hidden_and_wait(wchar_t *cmdline) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
+    WaitForSingleObject(pi.hProcess, 3000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+
+static bool query_autostart_task(void) {
+    wchar_t cmd[256] = L"schtasks.exe /Query /TN \"ZenScroll\"";
+    return run_hidden_and_wait(cmd);
+}
+
+static bool query_autostart(void) {
+    HKEY key;
+    wchar_t path[256];
+    autostart_reg_path(path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    if (query_autostart_task()) return true;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
+    DWORD type = 0;
+    wchar_t value[MAX_PATH * 3] = L"";
+    DWORD bytes = sizeof(value);
+    LONG rc = RegQueryValueExW(key, L"ZenScroll", NULL, &type, (LPBYTE)value, &bytes);
+    RegCloseKey(key);
+    return rc == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && value[0] != 0;
+}
+
+static void set_autostart_registry(bool enabled) {
+    HKEY key;
+    wchar_t path[256];
+    autostart_reg_path(path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    wchar_t task_cmd[MAX_PATH * 4] = L"";
+    if (enabled) {
+        wchar_t exe[MAX_PATH * 2] = L"";
+        GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+        swprintf(task_cmd, sizeof(task_cmd) / sizeof(task_cmd[0]), L"schtasks.exe /Create /TN \"ZenScroll\" /SC ONLOGON /TR \"\\\"%ls\\\"\" /RL HIGHEST /F", exe);
+        if (run_hidden_and_wait(task_cmd)) {
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
+                RegDeleteValueW(key, L"ZenScroll");
+                RegCloseKey(key);
+            }
+            return;
+        }
+    } else {
+        wcscpy(task_cmd, L"schtasks.exe /Delete /TN \"ZenScroll\" /F");
+        run_hidden_and_wait(task_cmd);
+    }
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, path, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS) return;
+    if (enabled) {
+        wchar_t exe[MAX_PATH * 2] = L"";
+        wchar_t cmd[MAX_PATH * 2 + 16] = L"";
+        GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+        swprintf(cmd, sizeof(cmd) / sizeof(cmd[0]), L"\"%ls\"", exe);
+        RegSetValueExW(key, L"ZenScroll", 0, REG_SZ, (const BYTE *)cmd, (DWORD)((wcslen(cmd) + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, L"ZenScroll");
+    }
+    RegCloseKey(key);
 }
 
 static char *read_config_file(DWORD *len_out) {
@@ -101,7 +180,7 @@ static void write_config(void) {
     wchar_t *slash = wcsrchr(dir, L'\\');
     if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
     char json[256];
-    snprintf(json, sizeof(json), "{\n  \"enabled\": %s,\n  \"speed_preset\": %d,\n  \"custom_profiles\": [],\n  \"debug\": false\n}\n", g_enabled ? "true" : "false", g_speed_preset);
+    snprintf(json, sizeof(json), "{\n  \"enabled\": %s,\n  \"speed_preset\": %d,\n  \"autostart\": %s,\n  \"custom_profiles\": [],\n  \"debug\": false\n}\n", g_enabled ? "true" : "false", g_speed_preset, g_autostart ? "true" : "false");
     HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return;
     DWORD written = 0;
@@ -112,7 +191,7 @@ static void write_config(void) {
 static void reload_config(void) {
     DWORD len = 0;
     char *buf = read_config_file(&len);
-    if (!buf) { g_enabled = 1; g_speed_preset = 1; write_config(); return; }
+    if (!buf) { g_enabled = 1; g_speed_preset = 1; g_autostart = query_autostart(); write_config(); return; }
     char *p = strstr(buf, "\"enabled\"");
     if (p && (p = strchr(p, ':'))) {
         p = (char *)skip_ws(p + 1);
@@ -124,6 +203,13 @@ static void reload_config(void) {
         if (v < 0) v = 0;
         if (v > 2) v = 2;
         g_speed_preset = v;
+    }
+    p = strstr(buf, "\"autostart\"");
+    if (p && (p = strchr(p, ':'))) {
+        p = (char *)skip_ws(p + 1);
+        g_autostart = (strncmp(p, "true", 4) == 0);
+    } else {
+        g_autostart = query_autostart();
     }
     HeapFree(GetProcessHeap(), 0, buf);
 }
@@ -147,6 +233,47 @@ static void set_preset(int preset) {
     update_ui();
     update_tray_tip();
     lower_working_set();
+}
+
+static void set_autostart(bool enabled) {
+    g_autostart = enabled;
+    set_autostart_registry(enabled);
+    write_config();
+    update_ui();
+    update_tray_tip();
+    lower_working_set();
+}
+
+static bool class_name_is(HWND hwnd, const wchar_t *name) {
+    wchar_t cls[96] = L"";
+    if (!hwnd || !GetClassNameW(hwnd, cls, (int)(sizeof(cls) / sizeof(cls[0])))) return false;
+    return wcscmp(cls, name) == 0;
+}
+
+static bool window_is_explorer(HWND hwnd) {
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    return class_name_is(root, L"CabinetWClass") || class_name_is(root, L"ExploreWClass");
+}
+
+typedef struct FindListViewCtx {
+    HWND found;
+} FindListViewCtx;
+
+static BOOL CALLBACK find_listview_proc(HWND hwnd, LPARAM lp) {
+    FindListViewCtx *ctx = (FindListViewCtx *)lp;
+    if (class_name_is(hwnd, L"SysListView32")) {
+        ctx->found = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HWND explorer_listview(HWND hwnd) {
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    FindListViewCtx ctx;
+    ctx.found = NULL;
+    if (root) EnumChildWindows(root, find_listview_proc, (LPARAM)&ctx);
+    return ctx.found;
 }
 
 static double adaptive_scroll_factor(double interval_ms) {
@@ -173,6 +300,7 @@ static void feed_wheel(int raw_delta, HWND target, POINT pt) {
     g_last_scroll_time = now;
     g_scroll_hwnd = target;
     g_scroll_pt = pt;
+    g_scroll_explorer = window_is_explorer(target);
     g_velocity += (double)raw_delta * cfg->scroll_accel * factor;
     if (g_velocity > cfg->max_velocity) g_velocity = cfg->max_velocity;
     if (g_velocity < -cfg->max_velocity) g_velocity = -cfg->max_velocity;
@@ -201,7 +329,21 @@ static void tick_injector(void) {
         input.type = INPUT_MOUSE;
         input.mi.mouseData = (DWORD)delta;
         input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-        if (g_scroll_hwnd && IsWindow(g_scroll_hwnd)) {
+        if (g_scroll_explorer && g_scroll_hwnd && IsWindow(g_scroll_hwnd)) {
+            HWND list = explorer_listview(g_scroll_hwnd);
+            if (list && IsWindow(list)) {
+                int pixels = -delta / 3;
+                if (pixels == 0) pixels = delta < 0 ? 1 : -1;
+                if (pixels > 80) pixels = 80;
+                if (pixels < -80) pixels = -80;
+                PostMessageW(list, LVM_SCROLL, 0, (LPARAM)pixels);
+            } else {
+                HWND root = GetAncestor(g_scroll_hwnd, GA_ROOT);
+                WPARAM wp = ((WPARAM)((WORD)delta)) << 16;
+                LPARAM lp = ((LPARAM)((WORD)g_scroll_pt.x)) | (((LPARAM)((WORD)g_scroll_pt.y)) << 16);
+                PostMessageW(root ? root : g_scroll_hwnd, WM_MOUSEWHEEL, wp, lp);
+            }
+        } else if (g_scroll_hwnd && IsWindow(g_scroll_hwnd)) {
             WPARAM wp = ((WPARAM)((WORD)delta)) << 16;
             LPARAM lp = ((LPARAM)((WORD)g_scroll_pt.x)) | (((LPARAM)((WORD)g_scroll_pt.y)) << 16);
             PostMessageW(g_scroll_hwnd, WM_MOUSEWHEEL, wp, lp);
@@ -290,6 +432,7 @@ static void show_menu(void) {
     AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_BYCOMMAND, CMD_STATUS, g_enabled ? L" 运行中" : L" 已停止");
     AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, NULL);
     AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_TOGGLE, g_enabled ? L"禁用" : L"启用");
+    AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_AUTOSTART, g_autostart ? L"关闭开机自启" : L"开启开机自启");
     AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, NULL);
     AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_SHOW_UI, L"控制面板");
     AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, NULL);
@@ -301,10 +444,11 @@ static void show_menu(void) {
     DestroyMenu(menu);
 }
 
-static RECT g_toggle_rect = {28, 190, 144, 228};
-static RECT g_slow_rect = {166, 190, 244, 228};
-static RECT g_normal_rect = {256, 190, 334, 228};
-static RECT g_fast_rect = {346, 190, 424, 228};
+static RECT g_toggle_rect = {28, 188, 128, 226};
+static RECT g_autostart_rect = {140, 188, 240, 226};
+static RECT g_slow_rect = {28, 240, 118, 278};
+static RECT g_normal_rect = {130, 240, 220, 278};
+static RECT g_fast_rect = {232, 240, 322, 278};
 
 static void update_ui(void) {
     if (g_panel_hwnd) InvalidateRect(g_panel_hwnd, NULL, TRUE);
@@ -380,12 +524,13 @@ static void paint_panel(HWND hwnd) {
     draw_text(hdc, line, desc, RGB(203, 213, 225), 15, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     draw_button(hdc, g_toggle_rect, g_enabled ? L"禁用" : L"启用", true, true);
+    draw_button(hdc, g_autostart_rect, g_autostart ? L"自启开" : L"自启关", g_autostart, false);
     draw_button(hdc, g_slow_rect, L"慢速", g_speed_preset == 0, false);
     draw_button(hdc, g_normal_rect, L"正常", g_speed_preset == 1, false);
     draw_button(hdc, g_fast_rect, L"快速", g_speed_preset == 2, false);
 
-    RECT hint = {28, 254, 424, 282};
-    draw_text(hdc, L"关闭窗口最小化到托盘；右键托盘可退出。", hint, RGB(100, 116, 139), 14, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT hint = {28, 292, 424, 320};
+    draw_text(hdc, L"启动默认在托盘；右键托盘可退出。", hint, RGB(100, 116, 139), 14, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     EndPaint(hwnd, &ps);
 }
 
@@ -398,6 +543,7 @@ static LRESULT CALLBACK panel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int x = GET_X_LPARAM(lp);
             int y = GET_Y_LPARAM(lp);
             if (point_in_rect(g_toggle_rect, x, y)) set_enabled(!g_enabled);
+            else if (point_in_rect(g_autostart_rect, x, y)) set_autostart(!g_autostart);
             else if (point_in_rect(g_slow_rect, x, y)) set_preset(0);
             else if (point_in_rect(g_normal_rect, x, y)) set_preset(1);
             else if (point_in_rect(g_fast_rect, x, y)) set_preset(2);
@@ -420,6 +566,7 @@ static LRESULT CALLBACK tray_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COMMAND) {
         switch (LOWORD(wp)) {
             case CMD_TOGGLE: set_enabled(!g_enabled); break;
+            case CMD_AUTOSTART: set_autostart(!g_autostart); break;
             case CMD_SHOW_UI: show_panel(); break;
             case CMD_QUIT: DestroyWindow(hwnd); break;
             default: break;
@@ -462,7 +609,7 @@ static bool create_windows(HINSTANCE hInstance) {
     pc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     pc.hbrBackground = CreateSolidBrush(RGB(11, 18, 32));
     if (!RegisterClassW(&pc)) return false;
-    g_panel_hwnd = CreateWindowExW(0, pc.lpszClassName, L"ZenScroll", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 470, 330, NULL, NULL, hInstance, NULL);
+    g_panel_hwnd = CreateWindowExW(0, pc.lpszClassName, L"ZenScroll", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 470, 370, NULL, NULL, hInstance, NULL);
     return g_panel_hwnd != NULL;
 }
 
@@ -471,6 +618,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR cmd, int show) {
     HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
     InitializeCriticalSection(&g_lock);
     reload_config();
+    set_autostart_registry(g_autostart);
     SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &g_original_scroll_lines, 0);
     if (g_original_scroll_lines == 0) {
         UINT one = 1;
@@ -484,8 +632,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR cmd, int show) {
     update_ui();
     update_tray_tip();
     g_worker = CreateThread(NULL, 64 * 1024, worker_thread, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
-    ShowWindow(g_panel_hwnd, SW_SHOW);
-    UpdateWindow(g_panel_hwnd);
+    ShowWindow(g_panel_hwnd, SW_HIDE);
     lower_working_set();
 
     MSG msg;
@@ -504,3 +651,4 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR cmd, int show) {
     DeleteCriticalSection(&g_lock);
     return 0;
 }
+
