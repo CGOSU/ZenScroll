@@ -98,25 +98,6 @@ static bool run_hidden_and_wait(wchar_t *cmdline) {
     return code == 0;
 }
 
-static bool query_autostart_task(void) {
-    wchar_t cmd[256] = L"schtasks.exe /Query /TN \"ZenScroll\"";
-    return run_hidden_and_wait(cmd);
-}
-
-static bool query_autostart(void) {
-    HKEY key;
-    wchar_t path[256];
-    autostart_reg_path(path, (DWORD)(sizeof(path) / sizeof(path[0])));
-    if (query_autostart_task()) return true;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
-    DWORD type = 0;
-    wchar_t value[MAX_PATH * 3] = L"";
-    DWORD bytes = sizeof(value);
-    LONG rc = RegQueryValueExW(key, L"ZenScroll", NULL, &type, (LPBYTE)value, &bytes);
-    RegCloseKey(key);
-    return rc == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && value[0] != 0;
-}
-
 static void set_autostart_registry(bool enabled) {
     HKEY key;
     wchar_t path[256];
@@ -191,7 +172,7 @@ static void write_config(void) {
 static void reload_config(void) {
     DWORD len = 0;
     char *buf = read_config_file(&len);
-    if (!buf) { g_enabled = 1; g_speed_preset = 1; g_autostart = query_autostart(); write_config(); return; }
+    if (!buf) { g_enabled = 1; g_speed_preset = 1; g_autostart = false; write_config(); return; }
     char *p = strstr(buf, "\"enabled\"");
     if (p && (p = strchr(p, ':'))) {
         p = (char *)skip_ws(p + 1);
@@ -209,7 +190,7 @@ static void reload_config(void) {
         p = (char *)skip_ws(p + 1);
         g_autostart = (strncmp(p, "true", 4) == 0);
     } else {
-        g_autostart = query_autostart();
+        g_autostart = false;
     }
     HeapFree(GetProcessHeap(), 0, buf);
 }
@@ -618,7 +599,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR cmd, int show) {
     HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
     InitializeCriticalSection(&g_lock);
     reload_config();
-    set_autostart_registry(g_autostart);
+    if (g_autostart) set_autostart_registry(true);
     SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &g_original_scroll_lines, 0);
     if (g_original_scroll_lines == 0) {
         UINT one = 1;
