@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SPIF_UPDATEINIFILE, SystemParametersInfoW, TranslateMessage,
 };
 
-const TICK_INTERVAL: Duration = Duration::from_millis(8);
+const TICK_INTERVAL: Duration = Duration::from_millis(4);
 const WHEEL_PAGESCROLL: u32 = 0;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);

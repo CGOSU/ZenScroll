@@ -14,33 +14,33 @@ pub struct ScrollConfig {
 }
 
 pub const PRESET_SLOW: ScrollConfig = ScrollConfig {
-    friction: 0.92,
+    friction: 0.96,
     bounce_tension: 0.90,
-    min_velocity: 0.3,
+    min_velocity: 0.1,
     max_velocity: 80.0,
-    scroll_accel: 0.8,
+    scroll_accel: 0.7,
     smartwheel_friction_max: 0.97,
     deceleration_rate: 0.998,
     max_bounce_distance: 150.0,
 };
 
 pub const PRESET_NORMAL: ScrollConfig = ScrollConfig {
-    friction: 0.94,
+    friction: 0.975,
     bounce_tension: 0.85,
-    min_velocity: 0.3,
+    min_velocity: 0.1,
     max_velocity: 200.0,
-    scroll_accel: 1.5,
+    scroll_accel: 1.2,
     smartwheel_friction_max: 0.985,
     deceleration_rate: 0.998,
     max_bounce_distance: 150.0,
 };
 
 pub const PRESET_FAST: ScrollConfig = ScrollConfig {
-    friction: 0.95,
+    friction: 0.985,
     bounce_tension: 0.80,
-    min_velocity: 0.5,
+    min_velocity: 0.15,
     max_velocity: 350.0,
-    scroll_accel: 2.5,
+    scroll_accel: 2.0,
     smartwheel_friction_max: 0.992,
     deceleration_rate: 0.998,
     max_bounce_distance: 150.0,
@@ -51,11 +51,11 @@ pub const PRESETS: [ScrollConfig; 3] = [PRESET_SLOW, PRESET_NORMAL, PRESET_FAST]
 impl Default for ScrollConfig {
     fn default() -> Self {
         Self {
-            friction: 0.92,
+            friction: 0.96,
             bounce_tension: 0.85,
-            min_velocity: 0.5,
+            min_velocity: 0.1,
             max_velocity: 150.0,
-            scroll_accel: 1.2,
+            scroll_accel: 1.0,
             deceleration_rate: 0.998,
             max_bounce_distance: 150.0,
             smartwheel_friction_max: 0.985,
@@ -171,10 +171,10 @@ pub fn smartwheel_friction(config: &ScrollConfig, velocity: f64) -> f64 {
 /// Fast scrolling (short interval) → higher factor → longer jump per notch.
 /// Slow scrolling (long interval) → lower factor → precise short jump.
 pub fn adaptive_scroll_factor(interval_ms: f64) -> f64 {
-    const FAST_MS: f64 = 30.0;
-    const SLOW_MS: f64 = 300.0;
-    const MIN_FACTOR: f64 = 0.3;
-    const MAX_FACTOR: f64 = 3.0;
+    const FAST_MS: f64 = 25.0;
+    const SLOW_MS: f64 = 400.0;
+    const MIN_FACTOR: f64 = 0.5;
+    const MAX_FACTOR: f64 = 3.5;
 
     if interval_ms >= SLOW_MS {
         MIN_FACTOR

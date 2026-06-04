@@ -7,7 +7,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use zen_scroll_core::physics::{adaptive_scroll_factor, smartwheel_friction, ScrollConfig};
 
 const WHEEL_DELTA: i32 = 120;
-const TICK_INTERVAL: Duration = Duration::from_millis(8);
+const TICK_INTERVAL: Duration = Duration::from_millis(4);
 
 pub static INJECTING: AtomicBool = AtomicBool::new(false);
 
