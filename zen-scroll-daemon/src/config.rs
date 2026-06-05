@@ -28,7 +28,12 @@ unsafe extern "system" {
     ) -> i32;
     fn RegDeleteValueW(hKey: isize, lpValueName: *const u16) -> i32;
     fn RegCloseKey(hKey: isize) -> i32;
-    fn OpenEventW(dwDesiredAccess: u32, bInheritHandle: i32, lpName: *const u16) -> isize;
+    fn CreateEventW(
+        lpEventAttributes: *mut std::ffi::c_void,
+        bManualReset: i32,
+        bInitialState: i32,
+        lpName: *const u16,
+    ) -> isize;
     fn SetEvent(hEvent: isize) -> i32;
     fn CloseHandle(hObject: isize) -> i32;
 }
@@ -37,7 +42,6 @@ const HKEY_CURRENT_USER: isize = -2147483647;
 const KEY_SET_VALUE: u32 = 0x0002;
 const REG_SZ: u32 = 1;
 const ERROR_SUCCESS: i32 = 0;
-const EVENT_ALL_ACCESS: u32 = 0x1F0003;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
@@ -125,14 +129,16 @@ pub fn save(cfg: &DaemonConfig) {
 
 fn signal_config_event() {
     let name: Vec<u16> = EVENT_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: OpenEventW opens the named event created by zen-scroll-ui. If the UI isn't running, it fails silently.
-    let ev = unsafe { OpenEventW(EVENT_ALL_ACCESS, 0, name.as_ptr()) };
+    // SAFETY: CreateEventW opens existing event or creates new one. Named event "ZenScrollConfigChange"
+    // is created by the UI process. CreateEventW succeeds across integrity levels where OpenEventW may
+    // fail due to UIPI access checks.
+    let ev = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, name.as_ptr()) };
     if ev == 0 || ev == -1_isize {
         return;
     }
     // SAFETY: SetEvent signals the event, waking the UI's background thread.
     unsafe { SetEvent(ev); }
-    // SAFETY: CloseHandle releases the event handle opened by OpenEventW.
+    // SAFETY: CloseHandle releases the handle.
     unsafe { CloseHandle(ev); }
 }
 

@@ -145,30 +145,32 @@ static CONFIG_DIRTY: AtomicBool = AtomicBool::new(false);
 fn start_config_watcher() {
     let name: Vec<u16> = EVENT_NAME.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: CreateEventW creates a named manual-reset event for cross-process signaling.
-    // bManualReset=TRUE (1) so multiple waits can see the signal.
     let ev = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, name.as_ptr()) };
-    if ev == 0 || ev == -1_isize {
-        // 回退到轮询
-        thread::spawn(|| {
-            let mut last = config_mtime();
+    let event_ok = ev != 0 && ev != -1_isize;
+
+    // 事件驱动线程（主通道）
+    if event_ok {
+        thread::spawn(move || {
             loop {
-                thread::sleep(Duration::from_millis(200));
-                let mtime = config_mtime();
-                if mtime.is_some() && mtime != last {
-                    last = mtime;
-                    CONFIG_DIRTY.store(true, Ordering::SeqCst);
-                }
+                // SAFETY: WaitForSingleObject blocks until the event is signaled.
+                unsafe { WaitForSingleObject(ev, u32::MAX); }
+                CONFIG_DIRTY.store(true, Ordering::SeqCst);
+                // SAFETY: ResetEvent sets the manual-reset event back to non-signaled.
+                unsafe { ResetEvent(ev); }
             }
         });
-        return;
     }
-    thread::spawn(move || {
+
+    // 1 秒轮询回退（备用通道，确保至少在这个间隔内同步）
+    thread::spawn(|| {
+        let mut last = config_mtime();
         loop {
-            // SAFETY: WaitForSingleObject blocks until the event is signaled (daemon writes config).
-            unsafe { WaitForSingleObject(ev, u32::MAX); }
-            CONFIG_DIRTY.store(true, Ordering::SeqCst);
-            // SAFETY: ResetEvent sets the manual-reset event back to non-signaled.
-            unsafe { ResetEvent(ev); }
+            thread::sleep(Duration::from_secs(1));
+            let mtime = config_mtime();
+            if mtime.is_some() && mtime != last {
+                last = mtime;
+                CONFIG_DIRTY.store(true, Ordering::SeqCst);
+            }
         }
     });
 }
