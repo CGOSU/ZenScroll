@@ -27,6 +27,8 @@
 #define ID_TXT_STATUS 2005
 #define WHEEL_DELTA_ZEN 120
 #define TICK_MS 8
+#define TARGET_HANDOFF_MOVE_PX 8
+#define INERTIA_CANCEL_MOVE_PX 16
 #define LVM_FIRST 0x1000
 #define LVM_SCROLL (LVM_FIRST + 20)
 
@@ -57,14 +59,35 @@ static bool g_active = false;
 static ULONGLONG g_last_tick = 0;
 static ULONGLONG g_last_scroll_time = 0;
 static HWND g_scroll_hwnd = NULL;
-static POINT g_scroll_pt = {0, 0};
-static bool g_scroll_explorer = false;
+static POINT g_scroll_anchor_pt = {0, 0};
+static bool g_chunked_wheel = false;
+static double g_wheel_remainder = 0.0;
+static bool g_pixel_listview = false;
+static HWND g_pixel_listview_hwnd = NULL;
 static int g_speed_preset = 1;
 static UINT g_original_scroll_lines = 3;
+static bool g_wheel_lines_changed = false;
 static bool g_autostart = false;
 
 static void lower_working_set(void) {
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+}
+
+static void apply_runtime_wheel_lines(void) {
+    if (g_enabled && g_original_scroll_lines != 1) {
+        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 1, NULL, SPIF_SENDCHANGE);
+        g_wheel_lines_changed = true;
+    } else if (!g_enabled && g_wheel_lines_changed) {
+        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, g_original_scroll_lines, NULL, SPIF_SENDCHANGE);
+        g_wheel_lines_changed = false;
+    }
+}
+
+static void restore_wheel_lines(void) {
+    if (g_wheel_lines_changed) {
+        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, g_original_scroll_lines, NULL, SPIF_SENDCHANGE);
+        g_wheel_lines_changed = false;
+    }
 }
 
 static void config_path(wchar_t *out, DWORD cap) {
@@ -200,6 +223,12 @@ static void update_tray_tip(void);
 
 static void set_enabled(bool enabled) {
     g_enabled = enabled ? 1 : 0;
+    apply_runtime_wheel_lines();
+    if (!enabled) {
+        g_active = false;
+        g_velocity = 0.0;
+        g_wheel_remainder = 0.0;
+    }
     write_config();
     update_ui();
     update_tray_tip();
@@ -231,30 +260,88 @@ static bool class_name_is(HWND hwnd, const wchar_t *name) {
     return wcscmp(cls, name) == 0;
 }
 
-static bool window_is_explorer(HWND hwnd) {
-    HWND root = GetAncestor(hwnd, GA_ROOT);
-    return class_name_is(root, L"CabinetWClass") || class_name_is(root, L"ExploreWClass");
+static bool process_name_is(HWND hwnd, const wchar_t *exe_name) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) return false;
+    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!proc) return false;
+    wchar_t path[MAX_PATH * 2] = L"";
+    DWORD len = (DWORD)(sizeof(path) / sizeof(path[0]));
+    bool match = false;
+    if (QueryFullProcessImageNameW(proc, 0, path, &len)) {
+        wchar_t *base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        match = _wcsicmp(base, exe_name) == 0;
+    }
+    CloseHandle(proc);
+    return match;
 }
 
-typedef struct FindListViewCtx {
-    HWND found;
-} FindListViewCtx;
+static HWND deepest_window_from_point(POINT pt) {
+    HWND hwnd = WindowFromPoint(pt);
+    HWND root = hwnd ? GetAncestor(hwnd, GA_ROOT) : NULL;
+    if (root) hwnd = root;
+    while (hwnd) {
+        POINT client_pt = pt;
+        ScreenToClient(hwnd, &client_pt);
+        HWND child = ChildWindowFromPointEx(hwnd, client_pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT);
+        if (!child || child == hwnd) break;
+        hwnd = child;
+    }
+    return hwnd;
+}
 
-static BOOL CALLBACK find_listview_proc(HWND hwnd, LPARAM lp) {
-    FindListViewCtx *ctx = (FindListViewCtx *)lp;
-    if (class_name_is(hwnd, L"SysListView32")) {
+static bool target_needs_chunked_wheel(HWND hwnd) {
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!root) root = hwnd;
+    if (class_name_is(root, L"CabinetWClass") || class_name_is(root, L"ExploreWClass")) return true;
+    if (class_name_is(root, L"TaskManagerWindow") || class_name_is(root, L"TaskManagerWindowClass")) return true;
+    if (process_name_is(root, L"Taskmgr.exe")) return true;
+    return false;
+}
+
+typedef struct ListViewFromPointCtx {
+    POINT pt;
+    HWND found;
+    LONG best_area;
+} ListViewFromPointCtx;
+
+static BOOL CALLBACK listview_from_point_proc(HWND hwnd, LPARAM lp) {
+    ListViewFromPointCtx *ctx = (ListViewFromPointCtx *)lp;
+    if (!class_name_is(hwnd, L"SysListView32")) return TRUE;
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc)) return TRUE;
+    if (ctx->pt.x < rc.left || ctx->pt.x >= rc.right || ctx->pt.y < rc.top || ctx->pt.y >= rc.bottom) return TRUE;
+    LONG area = (rc.right - rc.left) * (rc.bottom - rc.top);
+    if (!ctx->found || area < ctx->best_area) {
         ctx->found = hwnd;
-        return FALSE;
+        ctx->best_area = area;
     }
     return TRUE;
 }
 
-static HWND explorer_listview(HWND hwnd) {
+static HWND listview_from_target_point(HWND hwnd, POINT pt) {
+    if (!hwnd) return NULL;
+    HWND parent = hwnd;
+    for (int i = 0; i < 5 && parent; i++) {
+        if (class_name_is(parent, L"SysListView32")) return parent;
+        parent = GetParent(parent);
+    }
     HWND root = GetAncestor(hwnd, GA_ROOT);
-    FindListViewCtx ctx;
+    if (!root) root = hwnd;
+    ListViewFromPointCtx ctx;
+    ctx.pt = pt;
     ctx.found = NULL;
-    if (root) EnumChildWindows(root, find_listview_proc, (LPARAM)&ctx);
+    ctx.best_area = 0x7fffffff;
+    EnumChildWindows(root, listview_from_point_proc, (LPARAM)&ctx);
     return ctx.found;
+}
+
+static bool point_moved_beyond(POINT a, POINT b, LONG threshold) {
+    LONG dx = a.x - b.x;
+    LONG dy = a.y - b.y;
+    return dx > threshold || dx < -threshold || dy > threshold || dy < -threshold;
 }
 
 static double adaptive_scroll_factor(double interval_ms) {
@@ -279,9 +366,25 @@ static void feed_wheel(int raw_delta, HWND target, POINT pt) {
     const ScrollConfig *cfg = &PRESETS[g_speed_preset];
     double factor = g_active ? adaptive_scroll_factor((double)(now - g_last_scroll_time)) : 0.5;
     g_last_scroll_time = now;
-    g_scroll_hwnd = target;
-    g_scroll_pt = pt;
-    g_scroll_explorer = window_is_explorer(target);
+    bool chunked = target_needs_chunked_wheel(target);
+    HWND listview = listview_from_target_point(target, pt);
+    bool pixel_listview = listview != NULL;
+    HWND effective_target = pixel_listview ? listview : target;
+    bool target_handoff = effective_target != g_scroll_hwnd ||
+                           chunked != g_chunked_wheel ||
+                           pixel_listview != g_pixel_listview ||
+                           listview != g_pixel_listview_hwnd;
+    bool pointer_handoff = g_active && point_moved_beyond(pt, g_scroll_anchor_pt, TARGET_HANDOFF_MOVE_PX);
+    if (!g_active || target_handoff || pointer_handoff) {
+        g_wheel_remainder = 0.0;
+        g_velocity = 0.0;
+        g_scroll_anchor_pt = pt;
+        factor = 0.5;
+    }
+    g_scroll_hwnd = effective_target;
+    g_chunked_wheel = chunked;
+    g_pixel_listview = pixel_listview;
+    g_pixel_listview_hwnd = listview;
     g_velocity += (double)raw_delta * cfg->scroll_accel * factor;
     if (g_velocity > cfg->max_velocity) g_velocity = cfg->max_velocity;
     if (g_velocity < -cfg->max_velocity) g_velocity = -cfg->max_velocity;
@@ -291,6 +394,15 @@ static void feed_wheel(int raw_delta, HWND target, POINT pt) {
 
 static void tick_injector(void) {
     if (!g_active) return;
+    POINT current_pt;
+    if (GetCursorPos(&current_pt)) {
+        if (point_moved_beyond(current_pt, g_scroll_anchor_pt, INERTIA_CANCEL_MOVE_PX)) {
+            g_velocity = 0.0;
+            g_wheel_remainder = 0.0;
+            g_active = false;
+            return;
+        }
+    }
     ULONGLONG now = GetTickCount64();
     const ScrollConfig *cfg = &PRESETS[g_speed_preset];
     double dt_ratio = (double)(now - g_last_tick) / (double)TICK_MS;
@@ -310,25 +422,24 @@ static void tick_injector(void) {
         input.type = INPUT_MOUSE;
         input.mi.mouseData = (DWORD)delta;
         input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-        if (g_scroll_explorer && g_scroll_hwnd && IsWindow(g_scroll_hwnd)) {
-            HWND list = explorer_listview(g_scroll_hwnd);
-            if (list && IsWindow(list)) {
-                int pixels = -delta / 3;
-                if (pixels == 0) pixels = delta < 0 ? 1 : -1;
-                if (pixels > 80) pixels = 80;
-                if (pixels < -80) pixels = -80;
-                PostMessageW(list, LVM_SCROLL, 0, (LPARAM)pixels);
-            } else {
-                HWND root = GetAncestor(g_scroll_hwnd, GA_ROOT);
-                WPARAM wp = ((WPARAM)((WORD)delta)) << 16;
-                LPARAM lp = ((LPARAM)((WORD)g_scroll_pt.x)) | (((LPARAM)((WORD)g_scroll_pt.y)) << 16);
-                PostMessageW(root ? root : g_scroll_hwnd, WM_MOUSEWHEEL, wp, lp);
+        if (g_pixel_listview && g_pixel_listview_hwnd && IsWindow(g_pixel_listview_hwnd)) {
+            int pixels = -delta / 3;
+            if (pixels == 0) pixels = delta < 0 ? 1 : -1;
+            if (pixels > 80) pixels = 80;
+            if (pixels < -80) pixels = -80;
+            PostMessageW(g_pixel_listview_hwnd, LVM_SCROLL, 0, (LPARAM)pixels);
+        } else if (g_chunked_wheel) {
+            g_wheel_remainder += delta;
+            while (g_wheel_remainder >= WHEEL_DELTA_ZEN || g_wheel_remainder <= -WHEEL_DELTA_ZEN) {
+                int chunk = g_wheel_remainder > 0 ? WHEEL_DELTA_ZEN : -WHEEL_DELTA_ZEN;
+                g_wheel_remainder -= chunk;
+                input.mi.mouseData = (DWORD)chunk;
+                InterlockedExchange(&g_injecting, 1);
+                SendInput(1, &input, sizeof(INPUT));
+                InterlockedExchange(&g_injecting, 0);
             }
-        } else if (g_scroll_hwnd && IsWindow(g_scroll_hwnd)) {
-            WPARAM wp = ((WPARAM)((WORD)delta)) << 16;
-            LPARAM lp = ((LPARAM)((WORD)g_scroll_pt.x)) | (((LPARAM)((WORD)g_scroll_pt.y)) << 16);
-            PostMessageW(g_scroll_hwnd, WM_MOUSEWHEEL, wp, lp);
         } else {
+            input.mi.mouseData = (DWORD)delta;
             InterlockedExchange(&g_injecting, 1);
             SendInput(1, &input, sizeof(INPUT));
             InterlockedExchange(&g_injecting, 0);
@@ -355,7 +466,7 @@ static LRESULT CALLBACK mouse_proc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (g_enabled) {
             int raw_delta = (SHORT)HIWORD(ms->mouseData);
             POINT pt = ms->pt;
-            HWND target = WindowFromPoint(pt);
+            HWND target = deepest_window_from_point(pt);
             EnterCriticalSection(&g_lock);
             feed_wheel(raw_delta, target, pt);
             LeaveCriticalSection(&g_lock);
@@ -425,11 +536,11 @@ static void show_menu(void) {
     DestroyMenu(menu);
 }
 
-static RECT g_toggle_rect = {28, 188, 128, 226};
-static RECT g_autostart_rect = {140, 188, 240, 226};
-static RECT g_slow_rect = {28, 240, 118, 278};
-static RECT g_normal_rect = {130, 240, 220, 278};
-static RECT g_fast_rect = {232, 240, 322, 278};
+static RECT g_toggle_rect = {28, 198, 206, 238};
+static RECT g_autostart_rect = {222, 198, 424, 238};
+static RECT g_slow_rect = {28, 272, 148, 312};
+static RECT g_normal_rect = {162, 272, 290, 312};
+static RECT g_fast_rect = {304, 272, 424, 312};
 
 static void update_ui(void) {
     if (g_panel_hwnd) InvalidateRect(g_panel_hwnd, NULL, TRUE);
@@ -471,7 +582,7 @@ static void draw_button(HDC hdc, RECT rc, const wchar_t *text, bool active, bool
     COLORREF stroke = active ? RGB(96, 165, 250) : RGB(55, 65, 81);
     COLORREF text_color = primary ? RGB(255, 255, 255) : (active ? RGB(219, 234, 254) : RGB(209, 213, 219));
     draw_round_box(hdc, rc, fill, stroke, 14);
-    draw_text(hdc, text, rc, text_color, 18, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, text, rc, text_color, 17, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 static bool point_in_rect(RECT rc, int x, int y) {
@@ -483,35 +594,40 @@ static void paint_panel(HWND hwnd) {
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT client;
     GetClientRect(hwnd, &client);
-    fill_rect(hdc, client, RGB(11, 18, 32));
+    fill_rect(hdc, client, RGB(10, 16, 28));
 
-    RECT title = {28, 20, 430, 50};
-    draw_text(hdc, L"ZenScroll", title, RGB(243, 244, 246), 28, FW_BOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    RECT sub = {30, 50, 430, 74};
-    draw_text(hdc, L"像 macOS 一样平滑滚动", sub, RGB(148, 163, 184), 16, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    RECT title = {28, 22, 430, 50};
+    draw_text(hdc, L"ZenScroll", title, RGB(248, 250, 252), 28, FW_BOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    RECT sub = {30, 52, 430, 76};
+    draw_text(hdc, L"平滑滚动控制中心", sub, RGB(148, 163, 184), 16, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT card = {28, 96, 424, 170};
-    draw_round_box(hdc, card, RGB(15, 23, 42), RGB(30, 41, 59), 18);
+    RECT card = {28, 96, 424, 174};
+    draw_round_box(hdc, card, RGB(15, 23, 42), RGB(37, 51, 76), 18);
 
-    RECT dot = {48, 124, 66, 142};
+    RECT dot = {50, 125, 68, 143};
     draw_round_box(hdc, dot, g_enabled ? RGB(34, 197, 94) : RGB(239, 68, 68), g_enabled ? RGB(74, 222, 128) : RGB(248, 113, 113), 20);
-    RECT state = {82, 112, 390, 142};
+    RECT state = {84, 112, 390, 140};
     draw_text(hdc, g_enabled ? L"运行中" : L"已停止", state, g_enabled ? RGB(134, 239, 172) : RGB(252, 165, 165), 22, FW_BOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     const wchar_t *preset = g_speed_preset == 0 ? L"慢速" : (g_speed_preset == 1 ? L"正常" : L"快速");
     wchar_t line[160];
-    swprintf(line, sizeof(line) / sizeof(line[0]), L"当前速度：%ls    生效范围：全局滚动窗口", preset);
-    RECT desc = {82, 142, 400, 164};
+    swprintf(line, sizeof(line) / sizeof(line[0]), L"速度：%ls    范围：全局窗口", preset);
+    RECT desc = {84, 140, 400, 164};
     draw_text(hdc, line, desc, RGB(203, 213, 225), 15, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    draw_button(hdc, g_toggle_rect, g_enabled ? L"禁用" : L"启用", true, true);
-    draw_button(hdc, g_autostart_rect, g_autostart ? L"自启开" : L"自启关", g_autostart, false);
+    RECT control_label = {30, 178, 424, 196};
+    draw_text(hdc, L"功能", control_label, RGB(100, 116, 139), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_button(hdc, g_toggle_rect, g_enabled ? L"禁用滚动" : L"启用滚动", true, true);
+    draw_button(hdc, g_autostart_rect, g_autostart ? L"开机自启：开" : L"开机自启：关", g_autostart, false);
+
+    RECT speed_label = {30, 246, 424, 266};
+    draw_text(hdc, L"滚动速度", speed_label, RGB(100, 116, 139), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_button(hdc, g_slow_rect, L"慢速", g_speed_preset == 0, false);
     draw_button(hdc, g_normal_rect, L"正常", g_speed_preset == 1, false);
     draw_button(hdc, g_fast_rect, L"快速", g_speed_preset == 2, false);
 
-    RECT hint = {28, 292, 424, 320};
-    draw_text(hdc, L"启动默认在托盘；右键托盘可退出。", hint, RGB(100, 116, 139), 14, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT hint = {28, 324, 424, 344};
+    draw_text(hdc, L"启动默认在托盘；右键托盘可退出。", hint, RGB(100, 116, 139), 13, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     EndPaint(hwnd, &ps);
 }
 
@@ -556,6 +672,7 @@ static LRESULT CALLBACK tray_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_APP) {
         reload_config();
+        apply_runtime_wheel_lines();
         update_ui();
         update_tray_tip();
         lower_working_set();
@@ -590,7 +707,7 @@ static bool create_windows(HINSTANCE hInstance) {
     pc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     pc.hbrBackground = CreateSolidBrush(RGB(11, 18, 32));
     if (!RegisterClassW(&pc)) return false;
-    g_panel_hwnd = CreateWindowExW(0, pc.lpszClassName, L"ZenScroll", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 470, 370, NULL, NULL, hInstance, NULL);
+    g_panel_hwnd = CreateWindowExW(0, pc.lpszClassName, L"ZenScroll", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 470, 390, NULL, NULL, hInstance, NULL);
     return g_panel_hwnd != NULL;
 }
 
@@ -601,14 +718,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR cmd, int show) {
     reload_config();
     if (g_autostart) set_autostart_registry(true);
     SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &g_original_scroll_lines, 0);
-    if (g_original_scroll_lines == 0) {
-        UINT one = 1;
-        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, one, &one, SPIF_UPDATEINIFILE);
-    }
+    apply_runtime_wheel_lines();
 
-    if (!create_windows(hInstance)) return 1;
+    if (!create_windows(hInstance)) { restore_wheel_lines(); return 1; }
     g_hook = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hInstance, 0);
-    if (!g_hook) return 2;
+    if (!g_hook) { restore_wheel_lines(); return 2; }
     add_tray_icon();
     update_ui();
     update_tray_tip();
@@ -625,11 +739,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR cmd, int show) {
     InterlockedExchange(&g_running, 0);
     if (g_worker) { WaitForSingleObject(g_worker, 1000); CloseHandle(g_worker); }
     if (g_hook) UnhookWindowsHookEx(g_hook);
-    if (g_original_scroll_lines == 0) {
-        UINT zero = 0;
-        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 0, &zero, SPIF_UPDATEINIFILE);
-    }
+    restore_wheel_lines();
     DeleteCriticalSection(&g_lock);
     return 0;
 }
+
+
 
