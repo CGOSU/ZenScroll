@@ -4,8 +4,11 @@ use std::env;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
+
+const EVENT_NAME: &str = "ZenScrollConfigChange";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -35,6 +38,14 @@ unsafe extern "system" {
         lpDirectory: *const u16,
         nShowCmd: i32,
     ) -> isize;
+    fn CreateEventW(
+        lpEventAttributes: *mut std::ffi::c_void,
+        bManualReset: i32,
+        bInitialState: i32,
+        lpName: *const u16,
+    ) -> isize;
+    fn WaitForSingleObject(hHandle: isize, dwMilliseconds: u32) -> u32;
+    fn ResetEvent(hEvent: isize) -> i32;
 }
 
 fn daemon_class() -> Vec<u16> {
@@ -108,6 +119,10 @@ fn config_path() -> PathBuf {
     base.join("ZenScroll").join("config.json")
 }
 
+fn config_mtime() -> Option<std::time::SystemTime> {
+    fs::metadata(config_path()).ok().and_then(|m| m.modified().ok())
+}
+
 fn read_config() -> serde_json::Value {
     match fs::read_to_string(config_path()) {
         Ok(s) => serde_json::from_str(&s).unwrap_or(default_config()),
@@ -123,6 +138,39 @@ fn default_config() -> serde_json::Value {
         "debug": false,
         "autostart": false
     })
+}
+
+static CONFIG_DIRTY: AtomicBool = AtomicBool::new(false);
+
+fn start_config_watcher() {
+    let name: Vec<u16> = EVENT_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: CreateEventW creates a named manual-reset event for cross-process signaling.
+    // bManualReset=TRUE (1) so multiple waits can see the signal.
+    let ev = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, name.as_ptr()) };
+    if ev == 0 || ev == -1_isize {
+        // 回退到轮询
+        thread::spawn(|| {
+            let mut last = config_mtime();
+            loop {
+                thread::sleep(Duration::from_millis(200));
+                let mtime = config_mtime();
+                if mtime.is_some() && mtime != last {
+                    last = mtime;
+                    CONFIG_DIRTY.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        return;
+    }
+    thread::spawn(move || {
+        loop {
+            // SAFETY: WaitForSingleObject blocks until the event is signaled (daemon writes config).
+            unsafe { WaitForSingleObject(ev, u32::MAX); }
+            CONFIG_DIRTY.store(true, Ordering::SeqCst);
+            // SAFETY: ResetEvent sets the manual-reset event back to non-signaled.
+            unsafe { ResetEvent(ev); }
+        }
+    });
 }
 
 fn write_config(v: &serde_json::Value) {
@@ -182,8 +230,11 @@ impl ConfigPanel {
         }
     }
 
-    /// 从 config.json 同步状态，返回是否发生变化
+    /// 检查 CONFIG_DIRTY 标记，仅文件变更时才解析 JSON
     fn sync_from_config(&mut self) -> bool {
+        if !CONFIG_DIRTY.swap(false, Ordering::SeqCst) {
+            return false;
+        }
         let cfg = read_config();
         let new_enabled = cfg["enabled"].as_bool().unwrap_or(true);
         let new_selected = cfg["speed_preset"].as_u64().unwrap_or(1) as usize;
@@ -203,7 +254,7 @@ impl ConfigPanel {
         false
     }
 
-    fn save_and_signal(&self) {
+    fn save_and_signal(&mut self) {
         let mut cfg = read_config();
         cfg["speed_preset"] = serde_json::json!(self.selected);
         cfg["enabled"] = serde_json::json!(self.enabled);
@@ -460,6 +511,7 @@ impl ConfigPanel {
 }
 
 fn main() {
+    start_config_watcher();
     ensure_daemon_running();
     Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(320.0), px(486.0)), cx);

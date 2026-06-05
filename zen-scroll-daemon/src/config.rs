@@ -8,6 +8,7 @@ use zen_scroll_core::physics::{ScrollConfig, PRESETS, PRESET_NORMAL};
 
 const REG_RUN_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const REG_VALUE_NAME: &str = "ZenScroll";
+const EVENT_NAME: &str = "ZenScrollConfigChange";
 
 unsafe extern "system" {
     fn RegOpenKeyExW(
@@ -27,12 +28,16 @@ unsafe extern "system" {
     ) -> i32;
     fn RegDeleteValueW(hKey: isize, lpValueName: *const u16) -> i32;
     fn RegCloseKey(hKey: isize) -> i32;
+    fn OpenEventW(dwDesiredAccess: u32, bInheritHandle: i32, lpName: *const u16) -> isize;
+    fn SetEvent(hEvent: isize) -> i32;
+    fn CloseHandle(hObject: isize) -> i32;
 }
 
 const HKEY_CURRENT_USER: isize = -2147483647;
 const KEY_SET_VALUE: u32 = 0x0002;
 const REG_SZ: u32 = 1;
 const ERROR_SUCCESS: i32 = 0;
+const EVENT_ALL_ACCESS: u32 = 0x1F0003;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
@@ -111,10 +116,24 @@ pub fn save(cfg: &DaemonConfig) {
                 eprintln!("[ZenScroll] 写入配置失败: {}", e);
             } else {
                 eprintln!("[ZenScroll] 配置已保存: {:?}", path);
+                signal_config_event();
             }
         }
         Err(e) => eprintln!("[ZenScroll] 配置序列化错误: {}", e),
     }
+}
+
+fn signal_config_event() {
+    let name: Vec<u16> = EVENT_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: OpenEventW opens the named event created by zen-scroll-ui. If the UI isn't running, it fails silently.
+    let ev = unsafe { OpenEventW(EVENT_ALL_ACCESS, 0, name.as_ptr()) };
+    if ev == 0 || ev == -1_isize {
+        return;
+    }
+    // SAFETY: SetEvent signals the event, waking the UI's background thread.
+    unsafe { SetEvent(ev); }
+    // SAFETY: CloseHandle releases the event handle opened by OpenEventW.
+    unsafe { CloseHandle(ev); }
 }
 
 pub fn current_config() -> ScrollConfig {
