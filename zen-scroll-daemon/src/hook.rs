@@ -5,8 +5,7 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, MSG, MSLLHOOKSTRUCT, SetWindowsHookExW, UnhookWindowsHookEx,
-    WH_MOUSE_LL, HHOOK,
-    WM_MOUSEWHEEL,
+    WH_MOUSE_LL, HHOOK, WM_MOUSEWHEEL,
 };
 
 use crate::detect::TargetWindow;
@@ -43,9 +42,9 @@ extern "system" fn low_level_mouse_proc(n_code: i32, w_param: WPARAM, l_param: L
     if n_code >= 0 && w_param.0 as u32 == WM_MOUSEWHEEL {
         // SAFETY: l_param points to a valid MSLLHOOKSTRUCT when n_code >= 0 and message is WM_MOUSEWHEEL,
         // as documented by the WH_MOUSE_LL hook specification.
-        let raw_delta = unsafe {
+        let (raw_delta, pt) = unsafe {
             let hook_struct = &*(l_param.0 as *const MSLLHOOKSTRUCT);
-            (hook_struct.mouseData >> 16) as i16 as i32
+            ((hook_struct.mouseData >> 16) as i16 as i32, hook_struct.pt)
         };
 
         if raw_delta != 0
@@ -56,19 +55,26 @@ extern "system" fn low_level_mouse_proc(n_code: i32, w_param: WPARAM, l_param: L
                 return unsafe { CallNextHookEx(None, n_code, w_param, l_param) };
             }
 
-            if let Some(target) = TargetWindow::foreground() {
+            if let Some(target) = TargetWindow::from_hook(pt) {
                 let profile = find_profile(&target.process_name);
 
-                if let Some(p) = profile {
+                    if let Some(p) = profile {
                     if p.enabled {
                         state.current_process = p.name.clone();
                         state.injector.set_config(config::current_config());
-                        state.injector.feed_wheel(raw_delta);
+                        state.injector.feed_wheel(
+                            raw_delta,
+                            target.cursor_pt,
+                            target.target_hwnd,
+                            target.listview_hwnd,
+                            target.chunked_wheel,
+                        );
                         debug_log!(
-                            "钩子 -> {} (增量={}, 速度={:.0})",
+                            "钩子 -> {} (增量={}, 速度={:.0}, 列表视图={})",
                             p.name,
                             raw_delta,
-                            state.injector.velocity()
+                            state.injector.velocity(),
+                            if target.listview_hwnd != 0 { "是" } else { "否" }
                         );
                         return LRESULT(1);
                     } else {

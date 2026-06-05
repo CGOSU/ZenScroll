@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, SPI_GETWHEELSCROLLLINES, SPI_SETWHEELSCROLLLINES,
-    SPIF_UPDATEINIFILE, SystemParametersInfoW, TranslateMessage,
+    DispatchMessageW, GetMessageW, MSG, SetProcessDPIAware, SPI_GETWHEELSCROLLLINES,
+    SPI_SETWHEELSCROLLLINES, SPIF_UPDATEINIFILE, SystemParametersInfoW, TranslateMessage,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_millis(4);
@@ -59,6 +59,9 @@ fn restore_scroll_lines() {
 }
 
 fn main() {
+    // SAFETY: SetProcessDPIAware makes the process system DPI aware so that GetCursorPos
+    // returns physical pixel coordinates matching MSLLHOOKSTRUCT.pt.
+    unsafe { let _ = SetProcessDPIAware(); }
     save_and_override_scroll_lines();
     config::reload();
 
