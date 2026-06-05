@@ -6,9 +6,9 @@ use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DefWindowProcW, DestroyWindow, SetForegroundWindow,
     TrackPopupMenu, AppendMenuW, CreateWindowExW, PostMessageW, DestroyMenu,
-    PostQuitMessage, GetCursorPos, FindWindowW,
+    PostQuitMessage, GetCursorPos, FindWindowW, ShowWindow,
     LookupIconIdFromDirectoryEx, CreateIconFromResourceEx,
-    WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_CLOSE, SW_SHOW,
+    WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_CLOSE, SW_SHOW, SW_HIDE,
     WNDCLASSW, CW_USEDEFAULT, HICON, HCURSOR,
     WINDOW_STYLE, WS_EX_TOOLWINDOW,
     TPM_LEFTALIGN, TPM_RIGHTBUTTON,
@@ -24,6 +24,7 @@ use windows::core::PCWSTR;
 
 use crate::config;
 use crate::hook;
+use crate::log;
 use crate::profile;
 
 const WM_TRAY_ICON: u32 = WM_APP + 1;
@@ -123,6 +124,21 @@ extern "system" fn tray_window_proc(
         }
         if let Ok(guard) = config::DAEMON_CONFIG.lock() {
             profile::apply_custom_profiles(&guard.custom_profiles);
+            log::set_debug(guard.debug);
+            config::sync_autostart(guard.autostart);
+            // SAFETY: GetConsoleWindow retrieves the console window handle (null if none).
+            let console = unsafe { windows::Win32::System::Console::GetConsoleWindow() };
+            if console.0.is_null() {
+                if guard.debug {
+                    // SAFETY: AllocConsole creates a new console for debug output.
+                    unsafe { let _ = windows::Win32::System::Console::AllocConsole(); }
+                }
+            } else {
+                // SAFETY: ShowWindow shows or hides the console based on debug state.
+                unsafe {
+                    let _ = ShowWindow(console, if guard.debug { SW_SHOW } else { SW_HIDE });
+                }
+            }
         }
         eprintln!("[ZenScroll] IPC 配置已重载");
         update_tray_tip(hwnd);

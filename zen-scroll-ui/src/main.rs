@@ -120,7 +120,8 @@ fn default_config() -> serde_json::Value {
         "enabled": true,
         "speed_preset": 1,
         "custom_profiles": [],
-        "debug": false
+        "debug": false,
+        "autostart": false
     })
 }
 
@@ -167,6 +168,7 @@ struct ConfigPanel {
     selected: usize,
     enabled: bool,
     debug: bool,
+    autostart: bool,
 }
 
 impl ConfigPanel {
@@ -176,6 +178,7 @@ impl ConfigPanel {
             selected: cfg["speed_preset"].as_u64().unwrap_or(1) as usize,
             enabled: cfg["enabled"].as_bool().unwrap_or(true),
             debug: cfg["debug"].as_bool().unwrap_or(false),
+            autostart: cfg["autostart"].as_bool().unwrap_or(false),
         }
     }
 
@@ -184,6 +187,7 @@ impl ConfigPanel {
         cfg["speed_preset"] = serde_json::json!(self.selected);
         cfg["enabled"] = serde_json::json!(self.enabled);
         cfg["debug"] = serde_json::json!(self.debug);
+        cfg["autostart"] = serde_json::json!(self.autostart);
         write_config(&cfg);
         signal_daemon();
     }
@@ -200,6 +204,7 @@ impl Render for ConfigPanel {
             .child(self.preset_picker(cx))
             .child(self.toggle_row(cx))
             .child(self.debug_row(cx))
+            .child(self.autostart_row(cx))
             .child(self.status_bar())
     }
 }
@@ -339,8 +344,7 @@ impl ConfigPanel {
             )
     }
 
-    fn debug_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let toggle_bg = if self.debug { rgb(0x6688cc) } else { rgb(0x333344) };
+    fn debug_row(&self, cx: &mut Context<Self>) -> impl IntoElement {        let toggle_bg = if self.debug { rgb(0x6688cc) } else { rgb(0x333344) };
         let label_color = if self.debug { rgb(0x88aadd) } else { rgb(0x666677) };
         let label = if self.debug { "调试日志：开" } else { "调试日志：关" };
 
@@ -376,6 +380,43 @@ impl ConfigPanel {
             )
     }
 
+    fn autostart_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let toggle_bg = if self.autostart { rgb(0x44ff88) } else { rgb(0x444444) };
+        let label_color = if self.autostart { rgb(0x44ff88) } else { rgb(0x888888) };
+        let label = if self.autostart { "开机自启：开" } else { "开机自启：关" };
+
+        div()
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
+                    this.autostart = !this.autostart;
+                    this.save_and_signal();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div().w(px(28.0)).h(px(16.0)).bg(toggle_bg).rounded_full().relative()
+                    .child(
+                        div()
+                            .w(px(12.0)).h(px(12.0))
+                            .rounded_full()
+                            .bg(rgb(0xffffff))
+                            .absolute()
+                            .left(if self.autostart { px(14.0) } else { px(2.0) })
+                            .top(px(2.0)),
+                    ),
+            )
+            .child(
+                div().text_color(label_color).text_xs().child(label),
+            )
+    }
+
     fn status_bar(&self) -> impl IntoElement {
         let c = &zen_scroll_core::physics::PRESETS[self.selected];
         div()
@@ -396,7 +437,7 @@ impl ConfigPanel {
 fn main() {
     ensure_daemon_running();
     Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(320.0), px(454.0)), cx);
+        let bounds = Bounds::centered(None, size(px(320.0), px(486.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

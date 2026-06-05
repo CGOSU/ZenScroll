@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, SetProcessDPIAware, SPI_GETWHEELSCROLLLINES,
-    SPI_SETWHEELSCROLLLINES, SPIF_UPDATEINIFILE, SystemParametersInfoW, TranslateMessage,
+    DispatchMessageW, GetMessageW, MSG, SetProcessDPIAware, ShowWindow,
+    SPI_GETWHEELSCROLLLINES, SPI_SETWHEELSCROLLLINES, SPIF_UPDATEINIFILE, SystemParametersInfoW,
+    TranslateMessage, SW_HIDE,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_millis(4);
@@ -74,6 +75,14 @@ fn main() {
             );
             profile::apply_custom_profiles(&cfg.custom_profiles);
         }
+        config::sync_autostart(cfg.autostart);
+    }
+
+    // 非调试模式隐藏控制台窗口
+    // SAFETY: GetConsoleWindow retrieves the console window handle (null if none).
+    let console = unsafe { windows::Win32::System::Console::GetConsoleWindow() };
+    if !console.0.is_null() && !log::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        unsafe { let _ = ShowWindow(console, SW_HIDE); }
     }
 
     if let Err(e) = hook::install_hook() {
