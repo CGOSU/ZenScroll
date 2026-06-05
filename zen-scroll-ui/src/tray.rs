@@ -1,5 +1,4 @@
-﻿use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+﻿use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM, HINSTANCE, POINT, BOOL};
 use windows::Win32::Graphics::Gdi::HBRUSH;
@@ -8,7 +7,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TrackPopupMenu, AppendMenuW, CreateWindowExW, PostMessageW, DestroyMenu,
     PostQuitMessage, GetCursorPos, FindWindowW, ShowWindow,
     LookupIconIdFromDirectoryEx, CreateIconFromResourceEx,
-    WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_CLOSE, SW_SHOW, SW_HIDE,
+    WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_CLOSE, SW_SHOW,
     WNDCLASSW, CW_USEDEFAULT, HICON, HCURSOR,
     WINDOW_STYLE, WS_EX_TOOLWINDOW,
     TPM_LEFTALIGN, TPM_RIGHTBUTTON,
@@ -17,15 +16,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NOTIFYICONDATAW, ShellExecuteW,
+    Shell_NotifyIconW, NOTIFYICONDATAW,
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
 };
 use windows::core::PCWSTR;
 
 use crate::config;
 use crate::hook;
-use crate::log;
-use crate::profile;
 
 const WM_TRAY_ICON: u32 = WM_APP + 1;
 const CMD_STATUS: u32 = 1000;
@@ -38,30 +35,6 @@ static TRAY_EXIT: AtomicBool = AtomicBool::new(false);
 
 fn to_wstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn launch_ui() {
-    let exe = std::env::current_exe().ok();
-    let ui_path = exe.as_ref()
-        .and_then(|p| p.parent())
-        .map(|dir| dir.join("zen-scroll-ui.exe"));
-    let Some(path) = ui_path else { return };
-    if !path.exists() { return; }
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let verb: Vec<u16> = "open\0".encode_utf16().collect();
-
-    // SAFETY: ShellExecuteW("open") launches zen-scroll-ui.exe as a non-admin process.
-    unsafe {
-        ShellExecuteW(
-            HWND(std::ptr::null_mut()),
-            PCWSTR::from_raw(verb.as_ptr()),
-            PCWSTR::from_raw(wide.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOW,
-        );
-    }
 }
 
 extern "system" fn tray_window_proc(
@@ -78,7 +51,6 @@ extern "system" fn tray_window_proc(
                     let mut cfg = config::load();
                     cfg.enabled = state.enabled;
                     config::save(&cfg);
-                    config::reload();
                 }
                 update_tray_tip(hwnd);
             }
@@ -99,49 +71,39 @@ extern "system" fn tray_window_proc(
                     let mut cfg = config::load();
                     cfg.enabled = state.enabled;
                     config::save(&cfg);
-                    config::reload();
                 }
                 update_tray_tip(hwnd);
             }
             CMD_LAUNCH_UI => {
-                launch_ui();
+                let title = format!("ZenScroll v{}\0", env!("CARGO_PKG_VERSION"));
+                let wide: Vec<u16> = title.encode_utf16().collect();
+                // SAFETY: FindWindowW searches for our gpui window by title.
+                unsafe {
+                    if let Ok(gpui_hwnd) = FindWindowW(None, PCWSTR::from_raw(wide.as_ptr()))
+                        && !gpui_hwnd.0.is_null()
+                    {
+                        let _ = ShowWindow(gpui_hwnd, SW_SHOW);
+                        let _ = SetForegroundWindow(gpui_hwnd);
+                    }
+                }
             }
             CMD_QUIT => {
                 TRAY_EXIT.store(true, Ordering::SeqCst);
                 // SAFETY: PostMessageW sends WM_CLOSE to the tray window, which triggers WM_DESTROY and cleanup.
-            unsafe { let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)); }
+                unsafe { let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)); }
+                // 同时关闭 gpui 窗口，让 Application::run() 返回
+                let title = format!("ZenScroll v{}\0", env!("CARGO_PKG_VERSION"));
+                let wide: Vec<u16> = title.encode_utf16().collect();
+                unsafe {
+                    if let Ok(gpui_hwnd) = FindWindowW(None, PCWSTR::from_raw(wide.as_ptr()))
+                        && !gpui_hwnd.0.is_null()
+                    {
+                        let _ = PostMessageW(gpui_hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
             }
             _ => {}
         }
-        return LRESULT(0);
-    }
-
-    if msg == WM_APP {
-        config::reload();
-        if let Ok(mut state) = hook::HOOK_STATE.lock() {
-            state.enabled = config::is_enabled();
-            state.injector.set_config(config::current_config());
-        }
-        if let Ok(guard) = config::DAEMON_CONFIG.lock() {
-            profile::apply_custom_profiles(&guard.custom_profiles);
-            log::set_debug(guard.debug);
-            config::sync_autostart(guard.autostart);
-            // SAFETY: GetConsoleWindow retrieves the console window handle (null if none).
-            let console = unsafe { windows::Win32::System::Console::GetConsoleWindow() };
-            if console.0.is_null() {
-                if guard.debug {
-                    // SAFETY: AllocConsole creates a new console for debug output.
-                    unsafe { let _ = windows::Win32::System::Console::AllocConsole(); }
-                }
-            } else {
-                // SAFETY: ShowWindow shows or hides the console based on debug state.
-                unsafe {
-                    let _ = ShowWindow(console, if guard.debug { SW_SHOW } else { SW_HIDE });
-                }
-            }
-        }
-        eprintln!("[ZenScroll] IPC 配置已重载");
-        update_tray_tip(hwnd);
         return LRESULT(0);
     }
 
@@ -329,21 +291,12 @@ pub fn should_exit() -> bool {
     TRAY_EXIT.load(Ordering::SeqCst)
 }
 
-#[allow(dead_code)]
-pub fn find_daemon_hwnd() -> Option<isize> {
-    let class_name = to_wstr("ZenScrollTray");
-    // SAFETY: FindWindowW searches for the "ZenScrollTray" window class created by the daemon.
-    let hwnd = unsafe { FindWindowW(PCWSTR::from_raw(class_name.as_ptr()), None) };
-    if let Ok(h) = hwnd
-        && !h.0.is_null()
+pub fn sync_tip() {
+    if let Ok(guard) = TRAY_HWND.lock()
+        && let Some(hwnd) = *guard
     {
-        return Some(h.0 as isize);
+        update_tray_tip(HWND(hwnd as *mut _));
     }
-    None
 }
 
-#[allow(dead_code)]
-pub fn signal_reload_to(hwnd: isize) {
-    // SAFETY: hwnd is a valid daemon tray window handle.
-    unsafe { let _ = PostMessageW(HWND(hwnd as *mut _), WM_APP, WPARAM(0), LPARAM(0)); }
-}
+

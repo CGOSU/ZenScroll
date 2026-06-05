@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "zen-scroll-core",
     "zen-scroll-ui",
-    "zen-scroll-daemon",
 ]
 
 [workspace.package]

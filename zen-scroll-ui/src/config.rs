@@ -8,7 +8,6 @@ use zen_scroll_core::physics::{ScrollConfig, PRESETS, PRESET_NORMAL};
 
 const REG_RUN_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const REG_VALUE_NAME: &str = "ZenScroll";
-const EVENT_NAME: &str = "ZenScrollConfigChange";
 
 unsafe extern "system" {
     fn RegOpenKeyExW(
@@ -28,14 +27,6 @@ unsafe extern "system" {
     ) -> i32;
     fn RegDeleteValueW(hKey: isize, lpValueName: *const u16) -> i32;
     fn RegCloseKey(hKey: isize) -> i32;
-    fn CreateEventW(
-        lpEventAttributes: *mut std::ffi::c_void,
-        bManualReset: i32,
-        bInitialState: i32,
-        lpName: *const u16,
-    ) -> isize;
-    fn SetEvent(hEvent: isize) -> i32;
-    fn CloseHandle(hObject: isize) -> i32;
 }
 
 const HKEY_CURRENT_USER: isize = -2147483647;
@@ -120,26 +111,14 @@ pub fn save(cfg: &DaemonConfig) {
                 eprintln!("[ZenScroll] 写入配置失败: {}", e);
             } else {
                 eprintln!("[ZenScroll] 配置已保存: {:?}", path);
-                signal_config_event();
             }
         }
         Err(e) => eprintln!("[ZenScroll] 配置序列化错误: {}", e),
     }
-}
-
-fn signal_config_event() {
-    let name: Vec<u16> = EVENT_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: CreateEventW opens existing event or creates new one. Named event "ZenScrollConfigChange"
-    // is created by the UI process. CreateEventW succeeds across integrity levels where OpenEventW may
-    // fail due to UIPI access checks.
-    let ev = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, name.as_ptr()) };
-    if ev == 0 || ev == -1_isize {
-        return;
+    // 直接更新内存中的 DAEMON_CONFIG，无需 IPC
+    if let Ok(mut guard) = DAEMON_CONFIG.lock() {
+        *guard = cfg.clone();
     }
-    // SAFETY: SetEvent signals the event, waking the UI's background thread.
-    unsafe { SetEvent(ev); }
-    // SAFETY: CloseHandle releases the handle.
-    unsafe { CloseHandle(ev); }
 }
 
 pub fn current_config() -> ScrollConfig {
