@@ -182,6 +182,27 @@ impl ConfigPanel {
         }
     }
 
+    /// 从 config.json 同步状态，返回是否发生变化
+    fn sync_from_config(&mut self) -> bool {
+        let cfg = read_config();
+        let new_enabled = cfg["enabled"].as_bool().unwrap_or(true);
+        let new_selected = cfg["speed_preset"].as_u64().unwrap_or(1) as usize;
+        let new_debug = cfg["debug"].as_bool().unwrap_or(false);
+        let new_autostart = cfg["autostart"].as_bool().unwrap_or(false);
+        if new_enabled != self.enabled
+            || new_selected != self.selected
+            || new_debug != self.debug
+            || new_autostart != self.autostart
+        {
+            self.enabled = new_enabled;
+            self.selected = new_selected;
+            self.debug = new_debug;
+            self.autostart = new_autostart;
+            return true;
+        }
+        false
+    }
+
     fn save_and_signal(&self) {
         let mut cfg = read_config();
         cfg["speed_preset"] = serde_json::json!(self.selected);
@@ -195,6 +216,10 @@ impl ConfigPanel {
 
 impl Render for ConfigPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 轮询 config.json 同步外部状态（托盘、其他 UI 实例）
+        if self.sync_from_config() {
+            cx.notify();
+        }
         div()
             .size_full()
             .bg(rgb(0x1a1a2e))
