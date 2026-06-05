@@ -13,7 +13,20 @@ pub struct ScrollConfig {
     pub smartwheel_friction_max: f64,
 }
 
+// 慢：C 语言版（刚合并时的原始参数）
 pub const PRESET_SLOW: ScrollConfig = ScrollConfig {
+    friction: 0.96,
+    bounce_tension: 0.90,
+    min_velocity: 0.1,
+    max_velocity: 80.0,
+    scroll_accel: 0.7,
+    smartwheel_friction_max: 0.985,
+    deceleration_rate: 0.998,
+    max_bounce_distance: 150.0,
+};
+
+// 正常：原 Rust 慢
+pub const PRESET_NORMAL: ScrollConfig = ScrollConfig {
     friction: 0.96,
     bounce_tension: 0.90,
     min_velocity: 0.1,
@@ -24,7 +37,8 @@ pub const PRESET_SLOW: ScrollConfig = ScrollConfig {
     max_bounce_distance: 150.0,
 };
 
-pub const PRESET_NORMAL: ScrollConfig = ScrollConfig {
+// 快：原 Rust 正常
+pub const PRESET_FAST: ScrollConfig = ScrollConfig {
     friction: 0.975,
     bounce_tension: 0.85,
     min_velocity: 0.1,
@@ -35,31 +49,11 @@ pub const PRESET_NORMAL: ScrollConfig = ScrollConfig {
     max_bounce_distance: 150.0,
 };
 
-pub const PRESET_FAST: ScrollConfig = ScrollConfig {
-    friction: 0.985,
-    bounce_tension: 0.80,
-    min_velocity: 0.15,
-    max_velocity: 350.0,
-    scroll_accel: 2.0,
-    smartwheel_friction_max: 0.992,
-    deceleration_rate: 0.998,
-    max_bounce_distance: 150.0,
-};
-
 pub const PRESETS: [ScrollConfig; 3] = [PRESET_SLOW, PRESET_NORMAL, PRESET_FAST];
 
 impl Default for ScrollConfig {
     fn default() -> Self {
-        Self {
-            friction: 0.96,
-            bounce_tension: 0.85,
-            min_velocity: 0.1,
-            max_velocity: 150.0,
-            scroll_accel: 1.0,
-            deceleration_rate: 0.998,
-            max_bounce_distance: 150.0,
-            smartwheel_friction_max: 0.985,
-        }
+        PRESET_NORMAL
     }
 }
 
