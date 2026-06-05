@@ -1,5 +1,3 @@
-
-
 use core::time::Duration;
 #[derive(Debug, Clone)]
 pub struct ScrollConfig {
@@ -15,24 +13,24 @@ pub struct ScrollConfig {
 
 // 慢：C 语言版（刚合并时的原始参数）
 pub const PRESET_SLOW: ScrollConfig = ScrollConfig {
-    friction: 0.96,
+    friction: 0.92,
     bounce_tension: 0.90,
-    min_velocity: 0.1,
+    min_velocity: 0.3,
     max_velocity: 80.0,
-    scroll_accel: 0.7,
-    smartwheel_friction_max: 0.985,
+    scroll_accel: 0.8,
+    smartwheel_friction_max: 0.97,
     deceleration_rate: 0.998,
     max_bounce_distance: 150.0,
 };
 
 // 正常：原 Rust 慢
 pub const PRESET_NORMAL: ScrollConfig = ScrollConfig {
-    friction: 0.96,
+    friction: 0.94,
     bounce_tension: 0.90,
-    min_velocity: 0.1,
-    max_velocity: 80.0,
-    scroll_accel: 0.7,
-    smartwheel_friction_max: 0.97,
+    min_velocity: 0.3,
+    max_velocity: 200.0,
+    scroll_accel: 1.5,
+    smartwheel_friction_max: 0.985,
     deceleration_rate: 0.998,
     max_bounce_distance: 150.0,
 };
@@ -135,7 +133,9 @@ impl PhysicsState {
 
     pub fn apply_delta(&mut self, config: &ScrollConfig, delta: f64) {
         self.velocity += delta * config.scroll_accel;
-        self.velocity = self.velocity.clamp(-config.max_velocity, config.max_velocity);
+        self.velocity = self
+            .velocity
+            .clamp(-config.max_velocity, config.max_velocity);
         self.phase = if self.velocity.abs() > config.min_velocity {
             ScrollPhase::Momentum
         } else {
@@ -157,8 +157,7 @@ impl PhysicsState {
 pub fn smartwheel_friction(config: &ScrollConfig, velocity: f64) -> f64 {
     let speed_ratio = (velocity.abs() / config.max_velocity).clamp(0.0, 1.0);
     let weight = speed_ratio.powi(3);
-    config.friction
-        + (config.smartwheel_friction_max - config.friction) * weight
+    config.friction + (config.smartwheel_friction_max - config.friction) * weight
 }
 
 /// Maps the time between scroll events to a velocity multiplier.
