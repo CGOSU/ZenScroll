@@ -26,7 +26,7 @@
 #define ID_BTN_FAST 2004
 #define ID_TXT_STATUS 2005
 #define WHEEL_DELTA_ZEN 120
-#define TICK_MS 8
+#define TICK_MS 4
 #define TARGET_HANDOFF_MOVE_PX 8
 #define INERTIA_CANCEL_MOVE_PX 16
 #define LVM_FIRST 0x1000
@@ -41,9 +41,9 @@ typedef struct ScrollConfig {
 } ScrollConfig;
 
 static const ScrollConfig PRESETS[3] = {
-    {0.92, 0.3, 80.0, 0.8, 0.97},
-    {0.94, 0.3, 200.0, 1.5, 0.985},
-    {0.95, 0.5, 350.0, 2.5, 0.992},
+    {0.96, 0.1, 80.0, 0.7, 0.985},
+    {0.975, 0.1, 200.0, 1.2, 0.990},
+    {0.985, 0.15, 350.0, 2.0, 0.994},
 };
 
 static HHOOK g_hook = NULL;
@@ -62,6 +62,7 @@ static HWND g_scroll_hwnd = NULL;
 static POINT g_scroll_anchor_pt = {0, 0};
 static bool g_chunked_wheel = false;
 static double g_wheel_remainder = 0.0;
+static double g_fraction = 0.0;
 static bool g_pixel_listview = false;
 static HWND g_pixel_listview_hwnd = NULL;
 static int g_speed_preset = 1;
@@ -228,6 +229,7 @@ static void set_enabled(bool enabled) {
         g_active = false;
         g_velocity = 0.0;
         g_wheel_remainder = 0.0;
+        g_fraction = 0.0;
     }
     write_config();
     update_ui();
@@ -345,7 +347,7 @@ static bool point_moved_beyond(POINT a, POINT b, LONG threshold) {
 }
 
 static double adaptive_scroll_factor(double interval_ms) {
-    const double FAST_MS = 30.0, SLOW_MS = 300.0, MIN_FACTOR = 0.3, MAX_FACTOR = 3.0;
+    const double FAST_MS = 25.0, SLOW_MS = 400.0, MIN_FACTOR = 0.5, MAX_FACTOR = 3.5;
     if (interval_ms >= SLOW_MS) return MIN_FACTOR;
     if (interval_ms <= FAST_MS) return MAX_FACTOR;
     double t = (interval_ms - FAST_MS) / (SLOW_MS - FAST_MS);
@@ -377,9 +379,11 @@ static void feed_wheel(int raw_delta, HWND target, POINT pt) {
     bool pointer_handoff = g_active && point_moved_beyond(pt, g_scroll_anchor_pt, TARGET_HANDOFF_MOVE_PX);
     if (!g_active || target_handoff || pointer_handoff) {
         g_wheel_remainder = 0.0;
+        g_fraction = 0.0;
         g_velocity = 0.0;
         g_scroll_anchor_pt = pt;
         factor = 0.5;
+        g_last_tick = now;
     }
     g_scroll_hwnd = effective_target;
     g_chunked_wheel = chunked;
@@ -389,7 +393,6 @@ static void feed_wheel(int raw_delta, HWND target, POINT pt) {
     if (g_velocity > cfg->max_velocity) g_velocity = cfg->max_velocity;
     if (g_velocity < -cfg->max_velocity) g_velocity = -cfg->max_velocity;
     g_active = true;
-    g_last_tick = now;
 }
 
 static void tick_injector(void) {
@@ -399,6 +402,7 @@ static void tick_injector(void) {
         if (point_moved_beyond(current_pt, g_scroll_anchor_pt, INERTIA_CANCEL_MOVE_PX)) {
             g_velocity = 0.0;
             g_wheel_remainder = 0.0;
+            g_fraction = 0.0;
             g_active = false;
             return;
         }
@@ -409,10 +413,12 @@ static void tick_injector(void) {
     if (dt_ratio <= 0.0) dt_ratio = 1.0;
     if (dt_ratio > 8.0) dt_ratio = 8.0;
     g_last_tick = now;
-    int send = (int)(g_velocity * dt_ratio);
+    double raw_send = g_velocity * dt_ratio + g_fraction;
+    int send = (int)raw_send;
+    g_fraction = raw_send - (double)send;
     g_velocity *= smartwheel_friction(cfg, g_velocity);
     double av = g_velocity < 0 ? -g_velocity : g_velocity;
-    if (av < cfg->min_velocity) { g_velocity = 0.0; g_active = false; return; }
+    if (av < cfg->min_velocity) { g_velocity = 0.0; g_fraction = 0.0; g_active = false; return; }
     if (send != 0) {
         int delta = send;
         if (delta > WHEEL_DELTA_ZEN * 4) delta = WHEEL_DELTA_ZEN * 4;

@@ -23,8 +23,10 @@ ZenScroll/
 │   ├── log.rs                #   调试日志（时间戳 + 运行时开关）
 │   ├── tray.rs               #   系统托盘图标 + WM_APP IPC 处理
 │   └── main.rs               #   入口 + 消息泵
-└── zen-scroll-ui/            # 用户控制面板（GPU 加速，无权限要求）
-    └── main.rs               #   三档速度预设 + 配置文件读写 + 守护进程 IPC
+├── zen-scroll-ui/            # 用户控制面板（GPU 加速，无权限要求）
+│   └── main.rs               #   三档速度预设 + 配置文件读写 + 守护进程 IPC
+└── native-win32/             # 原生 Win32 C 实现（~30KB 二进制）
+    └── ZenScroll.c           #   单文件：托盘 + 钩子 + 面板 + 自启
 ```
 
 ### zen-scroll-core
@@ -47,7 +49,7 @@ Windows 系统级服务，工作在应用之外：
 
 1. **`hook.rs`** — `SetWindowsHookExW(WH_MOUSE_LL)` 安装全局低级别鼠标钩子，拦截原始滚动事件
 2. **`detect.rs`** — `GetForegroundWindow` → `GetWindowThreadProcessId` → `QueryFullProcessImageNameW` 识别前台进程名
-3. **`smoother.rs`** — `SmoothInjector` 将原始 120 刻度值转为指数衰减速度，通过 `SendInput` 以 8ms 间隔注入硬件级滚动（兼容 Chrome Raw Input）
+3. **`smoother.rs`** — `SmoothInjector` 将原始 120 刻度值转为指数衰减速度，通过 `SendInput` 以 4ms 间隔注入硬件级滚动（兼容 Chrome Raw Input），含分数累加器消除截断抖动
 4. **`profile.rs`** — 内置 Chrome / Readest / Firefox 三组应用匹配规则 + 自定义进程名覆盖
 5. **`config.rs`** — JSON 配置读写 + 全局 `DAEMON_CONFIG` 静态 + `reload()` 运行时重载
 6. **`log.rs`** — 调试日志模块，运行时通过 `debug` 配置开关，输出带时间戳
@@ -64,6 +66,23 @@ Windows 系统级服务，工作在应用之外：
 - 读写 `%APPDATA%/ZenScroll/config.json`
 - 通过 `FindWindowW` + `PostMessageW(WM_APP)` 向守护进程发送配置重载信号
 - 守护进程收到信号后重新加载配置并更新运行状态
+
+### native-win32
+
+独立原生 Win32 C 实现（`native-win32/ZenScroll.c`），提供与 Rust 版相同架构的滚轮优化：
+
+- 单文件编译，~30KB 剥离二进制，~0.9MB 工作集
+- 内置深色控制面板 UI（无需外部 GUI 框架）
+- 光标下方窗口定位（非仅前台窗口），支持 Explorer ListView 像素级滚动
+- 鼠标移动惯性取消、开机自启（计划任务/Run 注册表）
+- 物理参数与 Rust 版同步（4ms 注入间隔、分数累加器、Smartwheel 三次摩擦插值）
+- 所有界面字符串使用中文
+
+构建需 [mingw-w64](https://www.mingw-w64.org/)：
+```bash
+cd native-win32
+x86_64-w64-mingw32-gcc -O2 -mwindows -o ZenScroll.exe ZenScroll.c app.rc -lcomctl32 -lshlwapi
+```
 
 ---
 
@@ -169,19 +188,19 @@ friction     = Friction + (SmartMAX - Friction) × speed_ratio³
 
 | 预设 | 摩擦力 | Smart MAX | 回弹力 | 加速度 | 最大速度 | 最小速度 | 手感描述 |
 |------|--------|-----------|--------|--------|---------|---------|---------|
-| **慢** | 0.92 | 0.97 | 0.90 | 0.8 | 80 | 0.30 | 每格滚动精准，段落清晰，适合阅读/代码 |
-| **正常** | 0.94 | 0.985 | 0.85 | 1.5 | 200 | 0.30 | 慢速有阻尼感，快速能飞，日常浏览首选 |
-| **快** | 0.95 | 0.992 | 0.80 | 2.5 | 350 | 0.50 | 起速快、高速持久，适合长文档快速定位 |
+| **慢** | 0.96 | 0.985 | 0.90 | 0.7 | 80 | 0.10 | 段落清晰，阻尼感强，逐行阅读首选 |
+| **正常** | 0.975 | 0.990 | 0.85 | 1.2 | 200 | 0.10 | 慢速精细、快速顺滑，日常浏览最佳 |
+| **快** | 0.985 | 0.994 | 0.80 | 2.0 | 350 | 0.15 | 起速快、滑行远，长文档快速定位
 
-> **慢**：低速精确控制，整体偏紧较稳，适合需要逐行阅读的场景。
+> **慢**：阻尼较强，每格滚动控制精准，适合逐行阅读代码/文档。
 >
-> **正常**：慢速恰到好处的段落感，高速足够滑行距离，适应大多数场景。
+> **正常**：慢速精细、高速滑行距离适中，适应大多数日常场景。
 >
 > **快**：起速极快、高速持续久，适合频繁大范围跳转的长文档。
 
 ## 技术细节
 
-- 钩子回调运行于安装线程的消息泵中；注入运行于独立线程，8ms 间隔
+- 钩子回调运行于安装线程的消息泵中；注入运行于独立线程，4ms 间隔
 - 原始 `WM_MOUSEWHEEL` 事件通过 `LRESULT(1)` 被拦截丢弃，避免应用原生滚动
 - 使用 `SendInput` 模拟硬件级滚动输入，兼容 Chrome 的 Raw Input API（`PostMessageW` 无法工作）
 - 通过 `INJECTING` 原子标志防止 `SendInput` 导致的钩子重入死循环

@@ -62,3 +62,15 @@ ALWAYS handle errors comprehensively. Never silently swallow errors. Provide con
 - Global speed presets (PRESETS: [ScrollConfig; 3]) define all physics params
 - Profiles only define process targeting, not ScrollConfig
 - Smartwheel friction: friction + (smartwheel_friction_max - friction) * speed_ratio^3
+
+### Native Win32 (C implementation)
+- Located in `native-win32/`, single-file `ZenScroll.c`
+- Compiles with mingw-w64, ~30KB stripped binary, ~0.9MB working set
+- Same architecture: WH_MOUSE_LL hook → smooth injection via SendInput
+- Additional features over Rust version: cursor-targeted window (not just foreground),
+  Explorer ListView pixel scrolling, inertia cancel on mouse move, autostart
+- Physics presets must remain in sync with zen-scroll-core/src/physics.rs
+- Fractional accumulator (fraction) required for drift-free SendInput injection
+- All user-facing strings (tray menu, UI labels) must use Chinese
+- TICK_MS, friction, min_velocity, adaptive_scroll_factor constants must match
+  the Rust version's optimized values
