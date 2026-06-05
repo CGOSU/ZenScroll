@@ -1,0 +1,748 @@
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#include <windowsx.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <wchar.h>
+
+#define WM_TRAY_ICON (WM_APP + 1)
+#define CMD_STATUS 1000
+#define CMD_TOGGLE 1001
+#define CMD_SHOW_UI 1002
+#define CMD_QUIT 1003
+#define CMD_AUTOSTART 1004
+#define ID_BTN_TOGGLE 2001
+#define ID_BTN_SLOW 2002
+#define ID_BTN_NORMAL 2003
+#define ID_BTN_FAST 2004
+#define ID_TXT_STATUS 2005
+#define WHEEL_DELTA_ZEN 120
+#define TICK_MS 8
+#define TARGET_HANDOFF_MOVE_PX 8
+#define INERTIA_CANCEL_MOVE_PX 16
+#define LVM_FIRST 0x1000
+#define LVM_SCROLL (LVM_FIRST + 20)
+
+typedef struct ScrollConfig {
+    double friction;
+    double min_velocity;
+    double max_velocity;
+    double scroll_accel;
+    double smartwheel_friction_max;
+} ScrollConfig;
+
+static const ScrollConfig PRESETS[3] = {
+    {0.92, 0.3, 80.0, 0.8, 0.97},
+    {0.94, 0.3, 200.0, 1.5, 0.985},
+    {0.95, 0.5, 350.0, 2.5, 0.992},
+};
+
+static HHOOK g_hook = NULL;
+static HWND g_tray_hwnd = NULL;
+static HWND g_panel_hwnd = NULL;
+static HANDLE g_worker = NULL;
+static volatile LONG g_running = 1;
+static volatile LONG g_enabled = 1;
+static volatile LONG g_injecting = 0;
+static CRITICAL_SECTION g_lock;
+static double g_velocity = 0.0;
+static bool g_active = false;
+static ULONGLONG g_last_tick = 0;
+static ULONGLONG g_last_scroll_time = 0;
+static HWND g_scroll_hwnd = NULL;
+static POINT g_scroll_anchor_pt = {0, 0};
+static bool g_chunked_wheel = false;
+static double g_wheel_remainder = 0.0;
+static bool g_pixel_listview = false;
+static HWND g_pixel_listview_hwnd = NULL;
+static int g_speed_preset = 1;
+static UINT g_original_scroll_lines = 3;
+static bool g_wheel_lines_changed = false;
+static bool g_autostart = false;
+
+static void lower_working_set(void) {
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+}
+
+static void apply_runtime_wheel_lines(void) {
+    if (g_enabled && g_original_scroll_lines != 1) {
+        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, 1, NULL, SPIF_SENDCHANGE);
+        g_wheel_lines_changed = true;
+    } else if (!g_enabled && g_wheel_lines_changed) {
+        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, g_original_scroll_lines, NULL, SPIF_SENDCHANGE);
+        g_wheel_lines_changed = false;
+    }
+}
+
+static void restore_wheel_lines(void) {
+    if (g_wheel_lines_changed) {
+        SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, g_original_scroll_lines, NULL, SPIF_SENDCHANGE);
+        g_wheel_lines_changed = false;
+    }
+}
+
+static void config_path(wchar_t *out, DWORD cap) {
+    wchar_t base[MAX_PATH * 2] = L"";
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", base, (DWORD)(sizeof(base) / sizeof(base[0])));
+    if (n == 0 || n >= sizeof(base) / sizeof(base[0])) {
+        GetCurrentDirectoryW((DWORD)(sizeof(base) / sizeof(base[0])), base);
+    }
+    swprintf(out, cap, L"%ls\\ZenScroll\\config.json", base);
+}
+
+static void autostart_reg_path(wchar_t *out, DWORD cap) {
+    (void)cap;
+    wcscpy(out, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+}
+
+static bool run_hidden_and_wait(wchar_t *cmdline) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
+    WaitForSingleObject(pi.hProcess, 3000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+
+static void set_autostart_registry(bool enabled) {
+    HKEY key;
+    wchar_t path[256];
+    autostart_reg_path(path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    wchar_t task_cmd[MAX_PATH * 4] = L"";
+    if (enabled) {
+        wchar_t exe[MAX_PATH * 2] = L"";
+        GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+        swprintf(task_cmd, sizeof(task_cmd) / sizeof(task_cmd[0]), L"schtasks.exe /Create /TN \"ZenScroll\" /SC ONLOGON /TR \"\\\"%ls\\\"\" /RL HIGHEST /F", exe);
+        if (run_hidden_and_wait(task_cmd)) {
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
+                RegDeleteValueW(key, L"ZenScroll");
+                RegCloseKey(key);
+            }
+            return;
+        }
+    } else {
+        wcscpy(task_cmd, L"schtasks.exe /Delete /TN \"ZenScroll\" /F");
+        run_hidden_and_wait(task_cmd);
+    }
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, path, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS) return;
+    if (enabled) {
+        wchar_t exe[MAX_PATH * 2] = L"";
+        wchar_t cmd[MAX_PATH * 2 + 16] = L"";
+        GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+        swprintf(cmd, sizeof(cmd) / sizeof(cmd[0]), L"\"%ls\"", exe);
+        RegSetValueExW(key, L"ZenScroll", 0, REG_SZ, (const BYTE *)cmd, (DWORD)((wcslen(cmd) + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, L"ZenScroll");
+    }
+    RegCloseKey(key);
+}
+
+static char *read_config_file(DWORD *len_out) {
+    wchar_t path[MAX_PATH * 2];
+    config_path(path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    DWORD size = GetFileSize(f, NULL);
+    if (size == INVALID_FILE_SIZE || size > 65536) { CloseHandle(f); return NULL; }
+    char *buf = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size + 1);
+    if (!buf) { CloseHandle(f); return NULL; }
+    DWORD read = 0;
+    if (!ReadFile(f, buf, size, &read, NULL)) { HeapFree(GetProcessHeap(), 0, buf); CloseHandle(f); return NULL; }
+    CloseHandle(f);
+    buf[read] = 0;
+    if (len_out) *len_out = read;
+    return buf;
+}
+
+static const char *skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    return p;
+}
+
+static void write_config(void) {
+    wchar_t path[MAX_PATH * 2];
+    config_path(path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    wchar_t dir[MAX_PATH * 2];
+    wcscpy(dir, path);
+    wchar_t *slash = wcsrchr(dir, L'\\');
+    if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
+    char json[256];
+    snprintf(json, sizeof(json), "{\n  \"enabled\": %s,\n  \"speed_preset\": %d,\n  \"autostart\": %s,\n  \"custom_profiles\": [],\n  \"debug\": false\n}\n", g_enabled ? "true" : "false", g_speed_preset, g_autostart ? "true" : "false");
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(f, json, (DWORD)strlen(json), &written, NULL);
+    CloseHandle(f);
+}
+
+static void reload_config(void) {
+    DWORD len = 0;
+    char *buf = read_config_file(&len);
+    if (!buf) { g_enabled = 1; g_speed_preset = 1; g_autostart = false; write_config(); return; }
+    char *p = strstr(buf, "\"enabled\"");
+    if (p && (p = strchr(p, ':'))) {
+        p = (char *)skip_ws(p + 1);
+        g_enabled = (strncmp(p, "false", 5) == 0) ? 0 : 1;
+    }
+    p = strstr(buf, "\"speed_preset\"");
+    if (p && (p = strchr(p, ':'))) {
+        int v = atoi(p + 1);
+        if (v < 0) v = 0;
+        if (v > 2) v = 2;
+        g_speed_preset = v;
+    }
+    p = strstr(buf, "\"autostart\"");
+    if (p && (p = strchr(p, ':'))) {
+        p = (char *)skip_ws(p + 1);
+        g_autostart = (strncmp(p, "true", 4) == 0);
+    } else {
+        g_autostart = false;
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+}
+
+static void update_ui(void);
+static void update_tray_tip(void);
+
+static void set_enabled(bool enabled) {
+    g_enabled = enabled ? 1 : 0;
+    apply_runtime_wheel_lines();
+    if (!enabled) {
+        g_active = false;
+        g_velocity = 0.0;
+        g_wheel_remainder = 0.0;
+    }
+    write_config();
+    update_ui();
+    update_tray_tip();
+    lower_working_set();
+}
+
+static void set_preset(int preset) {
+    if (preset < 0) preset = 0;
+    if (preset > 2) preset = 2;
+    g_speed_preset = preset;
+    write_config();
+    update_ui();
+    update_tray_tip();
+    lower_working_set();
+}
+
+static void set_autostart(bool enabled) {
+    g_autostart = enabled;
+    set_autostart_registry(enabled);
+    write_config();
+    update_ui();
+    update_tray_tip();
+    lower_working_set();
+}
+
+static bool class_name_is(HWND hwnd, const wchar_t *name) {
+    wchar_t cls[96] = L"";
+    if (!hwnd || !GetClassNameW(hwnd, cls, (int)(sizeof(cls) / sizeof(cls[0])))) return false;
+    return wcscmp(cls, name) == 0;
+}
+
+static bool process_name_is(HWND hwnd, const wchar_t *exe_name) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) return false;
+    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!proc) return false;
+    wchar_t path[MAX_PATH * 2] = L"";
+    DWORD len = (DWORD)(sizeof(path) / sizeof(path[0]));
+    bool match = false;
+    if (QueryFullProcessImageNameW(proc, 0, path, &len)) {
+        wchar_t *base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        match = _wcsicmp(base, exe_name) == 0;
+    }
+    CloseHandle(proc);
+    return match;
+}
+
+static HWND deepest_window_from_point(POINT pt) {
+    HWND hwnd = WindowFromPoint(pt);
+    HWND root = hwnd ? GetAncestor(hwnd, GA_ROOT) : NULL;
+    if (root) hwnd = root;
+    while (hwnd) {
+        POINT client_pt = pt;
+        ScreenToClient(hwnd, &client_pt);
+        HWND child = ChildWindowFromPointEx(hwnd, client_pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT);
+        if (!child || child == hwnd) break;
+        hwnd = child;
+    }
+    return hwnd;
+}
+
+static bool target_needs_chunked_wheel(HWND hwnd) {
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!root) root = hwnd;
+    if (class_name_is(root, L"CabinetWClass") || class_name_is(root, L"ExploreWClass")) return true;
+    if (class_name_is(root, L"TaskManagerWindow") || class_name_is(root, L"TaskManagerWindowClass")) return true;
+    if (process_name_is(root, L"Taskmgr.exe")) return true;
+    return false;
+}
+
+typedef struct ListViewFromPointCtx {
+    POINT pt;
+    HWND found;
+    LONG best_area;
+} ListViewFromPointCtx;
+
+static BOOL CALLBACK listview_from_point_proc(HWND hwnd, LPARAM lp) {
+    ListViewFromPointCtx *ctx = (ListViewFromPointCtx *)lp;
+    if (!class_name_is(hwnd, L"SysListView32")) return TRUE;
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc)) return TRUE;
+    if (ctx->pt.x < rc.left || ctx->pt.x >= rc.right || ctx->pt.y < rc.top || ctx->pt.y >= rc.bottom) return TRUE;
+    LONG area = (rc.right - rc.left) * (rc.bottom - rc.top);
+    if (!ctx->found || area < ctx->best_area) {
+        ctx->found = hwnd;
+        ctx->best_area = area;
+    }
+    return TRUE;
+}
+
+static HWND listview_from_target_point(HWND hwnd, POINT pt) {
+    if (!hwnd) return NULL;
+    HWND parent = hwnd;
+    for (int i = 0; i < 5 && parent; i++) {
+        if (class_name_is(parent, L"SysListView32")) return parent;
+        parent = GetParent(parent);
+    }
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!root) root = hwnd;
+    ListViewFromPointCtx ctx;
+    ctx.pt = pt;
+    ctx.found = NULL;
+    ctx.best_area = 0x7fffffff;
+    EnumChildWindows(root, listview_from_point_proc, (LPARAM)&ctx);
+    return ctx.found;
+}
+
+static bool point_moved_beyond(POINT a, POINT b, LONG threshold) {
+    LONG dx = a.x - b.x;
+    LONG dy = a.y - b.y;
+    return dx > threshold || dx < -threshold || dy > threshold || dy < -threshold;
+}
+
+static double adaptive_scroll_factor(double interval_ms) {
+    const double FAST_MS = 30.0, SLOW_MS = 300.0, MIN_FACTOR = 0.3, MAX_FACTOR = 3.0;
+    if (interval_ms >= SLOW_MS) return MIN_FACTOR;
+    if (interval_ms <= FAST_MS) return MAX_FACTOR;
+    double t = (interval_ms - FAST_MS) / (SLOW_MS - FAST_MS);
+    return MAX_FACTOR + (MIN_FACTOR - MAX_FACTOR) * t;
+}
+
+static double smartwheel_friction(const ScrollConfig *cfg, double velocity) {
+    double v = velocity < 0 ? -velocity : velocity;
+    double ratio = v / cfg->max_velocity;
+    if (ratio < 0.0) ratio = 0.0;
+    if (ratio > 1.0) ratio = 1.0;
+    double weight = ratio * ratio * ratio;
+    return cfg->friction + (cfg->smartwheel_friction_max - cfg->friction) * weight;
+}
+
+static void feed_wheel(int raw_delta, HWND target, POINT pt) {
+    ULONGLONG now = GetTickCount64();
+    const ScrollConfig *cfg = &PRESETS[g_speed_preset];
+    double factor = g_active ? adaptive_scroll_factor((double)(now - g_last_scroll_time)) : 0.5;
+    g_last_scroll_time = now;
+    bool chunked = target_needs_chunked_wheel(target);
+    HWND listview = listview_from_target_point(target, pt);
+    bool pixel_listview = listview != NULL;
+    HWND effective_target = pixel_listview ? listview : target;
+    bool target_handoff = effective_target != g_scroll_hwnd ||
+                           chunked != g_chunked_wheel ||
+                           pixel_listview != g_pixel_listview ||
+                           listview != g_pixel_listview_hwnd;
+    bool pointer_handoff = g_active && point_moved_beyond(pt, g_scroll_anchor_pt, TARGET_HANDOFF_MOVE_PX);
+    if (!g_active || target_handoff || pointer_handoff) {
+        g_wheel_remainder = 0.0;
+        g_velocity = 0.0;
+        g_scroll_anchor_pt = pt;
+        factor = 0.5;
+    }
+    g_scroll_hwnd = effective_target;
+    g_chunked_wheel = chunked;
+    g_pixel_listview = pixel_listview;
+    g_pixel_listview_hwnd = listview;
+    g_velocity += (double)raw_delta * cfg->scroll_accel * factor;
+    if (g_velocity > cfg->max_velocity) g_velocity = cfg->max_velocity;
+    if (g_velocity < -cfg->max_velocity) g_velocity = -cfg->max_velocity;
+    g_active = true;
+    g_last_tick = now;
+}
+
+static void tick_injector(void) {
+    if (!g_active) return;
+    POINT current_pt;
+    if (GetCursorPos(&current_pt)) {
+        if (point_moved_beyond(current_pt, g_scroll_anchor_pt, INERTIA_CANCEL_MOVE_PX)) {
+            g_velocity = 0.0;
+            g_wheel_remainder = 0.0;
+            g_active = false;
+            return;
+        }
+    }
+    ULONGLONG now = GetTickCount64();
+    const ScrollConfig *cfg = &PRESETS[g_speed_preset];
+    double dt_ratio = (double)(now - g_last_tick) / (double)TICK_MS;
+    if (dt_ratio <= 0.0) dt_ratio = 1.0;
+    if (dt_ratio > 8.0) dt_ratio = 8.0;
+    g_last_tick = now;
+    int send = (int)(g_velocity * dt_ratio);
+    g_velocity *= smartwheel_friction(cfg, g_velocity);
+    double av = g_velocity < 0 ? -g_velocity : g_velocity;
+    if (av < cfg->min_velocity) { g_velocity = 0.0; g_active = false; return; }
+    if (send != 0) {
+        int delta = send;
+        if (delta > WHEEL_DELTA_ZEN * 4) delta = WHEEL_DELTA_ZEN * 4;
+        if (delta < -WHEEL_DELTA_ZEN * 4) delta = -WHEEL_DELTA_ZEN * 4;
+        INPUT input;
+        ZeroMemory(&input, sizeof(input));
+        input.type = INPUT_MOUSE;
+        input.mi.mouseData = (DWORD)delta;
+        input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        if (g_pixel_listview && g_pixel_listview_hwnd && IsWindow(g_pixel_listview_hwnd)) {
+            int pixels = -delta / 3;
+            if (pixels == 0) pixels = delta < 0 ? 1 : -1;
+            if (pixels > 80) pixels = 80;
+            if (pixels < -80) pixels = -80;
+            PostMessageW(g_pixel_listview_hwnd, LVM_SCROLL, 0, (LPARAM)pixels);
+        } else if (g_chunked_wheel) {
+            g_wheel_remainder += delta;
+            while (g_wheel_remainder >= WHEEL_DELTA_ZEN || g_wheel_remainder <= -WHEEL_DELTA_ZEN) {
+                int chunk = g_wheel_remainder > 0 ? WHEEL_DELTA_ZEN : -WHEEL_DELTA_ZEN;
+                g_wheel_remainder -= chunk;
+                input.mi.mouseData = (DWORD)chunk;
+                InterlockedExchange(&g_injecting, 1);
+                SendInput(1, &input, sizeof(INPUT));
+                InterlockedExchange(&g_injecting, 0);
+            }
+        } else {
+            input.mi.mouseData = (DWORD)delta;
+            InterlockedExchange(&g_injecting, 1);
+            SendInput(1, &input, sizeof(INPUT));
+            InterlockedExchange(&g_injecting, 0);
+        }
+    }
+}
+
+static DWORD WINAPI worker_thread(LPVOID unused) {
+    (void)unused;
+    while (InterlockedCompareExchange(&g_running, 1, 1)) {
+        EnterCriticalSection(&g_lock);
+        tick_injector();
+        LeaveCriticalSection(&g_lock);
+        Sleep(TICK_MS);
+    }
+    return 0;
+}
+
+static LRESULT CALLBACK mouse_proc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (InterlockedCompareExchange(&g_injecting, 1, 1)) return CallNextHookEx(NULL, nCode, wParam, lParam);
+    if (nCode >= 0 && wParam == WM_MOUSEWHEEL) {
+        MSLLHOOKSTRUCT *ms = (MSLLHOOKSTRUCT *)lParam;
+        if (ms && (ms->flags & 0x00000003)) return CallNextHookEx(NULL, nCode, wParam, lParam);
+        if (g_enabled) {
+            int raw_delta = (SHORT)HIWORD(ms->mouseData);
+            POINT pt = ms->pt;
+            HWND target = deepest_window_from_point(pt);
+            EnterCriticalSection(&g_lock);
+            feed_wheel(raw_delta, target, pt);
+            LeaveCriticalSection(&g_lock);
+            return 1;
+        }
+    }
+    return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
+static void update_tray_tip(void) {
+    if (!g_tray_hwnd) return;
+    NOTIFYICONDATAW nid;
+    ZeroMemory(&nid, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_tray_hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    swprintf(nid.szTip, sizeof(nid.szTip) / sizeof(nid.szTip[0]), L"ZenScroll - %ls", g_enabled ? L"运行中" : L"已停止");
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+static void add_tray_icon(void) {
+    NOTIFYICONDATAW nid;
+    ZeroMemory(&nid, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_tray_hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY_ICON;
+    nid.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(1));
+    if (!nid.hIcon) nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wcscpy(nid.szTip, L"ZenScroll - 运行中");
+    Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+static void remove_tray_icon(void) {
+    NOTIFYICONDATAW nid;
+    ZeroMemory(&nid, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_tray_hwnd;
+    nid.uID = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+static void show_panel(void) {
+    if (g_panel_hwnd) {
+        ShowWindow(g_panel_hwnd, SW_SHOW);
+        SetForegroundWindow(g_panel_hwnd);
+    }
+}
+
+static void show_menu(void) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_BYCOMMAND, CMD_STATUS, g_enabled ? L" 运行中" : L" 已停止");
+    AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, NULL);
+    AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_TOGGLE, g_enabled ? L"禁用" : L"启用");
+    AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_AUTOSTART, g_autostart ? L"关闭开机自启" : L"开启开机自启");
+    AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, NULL);
+    AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_SHOW_UI, L"控制面板");
+    AppendMenuW(menu, MF_SEPARATOR | MF_BYCOMMAND, 0, NULL);
+    AppendMenuW(menu, MF_STRING | MF_BYCOMMAND, CMD_QUIT, L"退出");
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(g_tray_hwnd);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_tray_hwnd, NULL);
+    DestroyMenu(menu);
+}
+
+static RECT g_toggle_rect = {28, 198, 206, 238};
+static RECT g_autostart_rect = {222, 198, 424, 238};
+static RECT g_slow_rect = {28, 272, 148, 312};
+static RECT g_normal_rect = {162, 272, 290, 312};
+static RECT g_fast_rect = {304, 272, 424, 312};
+
+static void update_ui(void) {
+    if (g_panel_hwnd) InvalidateRect(g_panel_hwnd, NULL, TRUE);
+}
+
+static void fill_rect(HDC hdc, RECT rc, COLORREF color) {
+    HBRUSH b = CreateSolidBrush(color);
+    FillRect(hdc, &rc, b);
+    DeleteObject(b);
+}
+
+static void draw_round_box(HDC hdc, RECT rc, COLORREF fill, COLORREF stroke, int radius) {
+    HBRUSH b = CreateSolidBrush(fill);
+    HPEN p = CreatePen(PS_SOLID, 1, stroke);
+    HGDIOBJ old_b = SelectObject(hdc, b);
+    HGDIOBJ old_p = SelectObject(hdc, p);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(hdc, old_b);
+    SelectObject(hdc, old_p);
+    DeleteObject(b);
+    DeleteObject(p);
+}
+
+static void draw_text(HDC hdc, const wchar_t *text, RECT rc, COLORREF color, int size, int weight, UINT format) {
+    HFONT font = CreateFontW(size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HGDIOBJ old = SelectObject(hdc, font);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, color);
+    DrawTextW(hdc, text, -1, &rc, format);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+static void draw_button(HDC hdc, RECT rc, const wchar_t *text, bool active, bool primary) {
+    COLORREF fill = primary ? (active ? RGB(37, 99, 235) : RGB(31, 41, 55))
+                            : (active ? RGB(30, 64, 175) : RGB(17, 24, 39));
+    COLORREF stroke = active ? RGB(96, 165, 250) : RGB(55, 65, 81);
+    COLORREF text_color = primary ? RGB(255, 255, 255) : (active ? RGB(219, 234, 254) : RGB(209, 213, 219));
+    draw_round_box(hdc, rc, fill, stroke, 14);
+    draw_text(hdc, text, rc, text_color, 17, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static bool point_in_rect(RECT rc, int x, int y) {
+    return x >= rc.left && x <= rc.right && y >= rc.top && y <= rc.bottom;
+}
+
+static void paint_panel(HWND hwnd) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT client;
+    GetClientRect(hwnd, &client);
+    fill_rect(hdc, client, RGB(10, 16, 28));
+
+    RECT title = {28, 22, 430, 50};
+    draw_text(hdc, L"ZenScroll", title, RGB(248, 250, 252), 28, FW_BOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    RECT sub = {30, 52, 430, 76};
+    draw_text(hdc, L"平滑滚动控制中心", sub, RGB(148, 163, 184), 16, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT card = {28, 96, 424, 174};
+    draw_round_box(hdc, card, RGB(15, 23, 42), RGB(37, 51, 76), 18);
+
+    RECT dot = {50, 125, 68, 143};
+    draw_round_box(hdc, dot, g_enabled ? RGB(34, 197, 94) : RGB(239, 68, 68), g_enabled ? RGB(74, 222, 128) : RGB(248, 113, 113), 20);
+    RECT state = {84, 112, 390, 140};
+    draw_text(hdc, g_enabled ? L"运行中" : L"已停止", state, g_enabled ? RGB(134, 239, 172) : RGB(252, 165, 165), 22, FW_BOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    const wchar_t *preset = g_speed_preset == 0 ? L"慢速" : (g_speed_preset == 1 ? L"正常" : L"快速");
+    wchar_t line[160];
+    swprintf(line, sizeof(line) / sizeof(line[0]), L"速度：%ls    范围：全局窗口", preset);
+    RECT desc = {84, 140, 400, 164};
+    draw_text(hdc, line, desc, RGB(203, 213, 225), 15, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT control_label = {30, 178, 424, 196};
+    draw_text(hdc, L"功能", control_label, RGB(100, 116, 139), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_button(hdc, g_toggle_rect, g_enabled ? L"禁用滚动" : L"启用滚动", true, true);
+    draw_button(hdc, g_autostart_rect, g_autostart ? L"开机自启：开" : L"开机自启：关", g_autostart, false);
+
+    RECT speed_label = {30, 246, 424, 266};
+    draw_text(hdc, L"滚动速度", speed_label, RGB(100, 116, 139), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_button(hdc, g_slow_rect, L"慢速", g_speed_preset == 0, false);
+    draw_button(hdc, g_normal_rect, L"正常", g_speed_preset == 1, false);
+    draw_button(hdc, g_fast_rect, L"快速", g_speed_preset == 2, false);
+
+    RECT hint = {28, 324, 424, 344};
+    draw_text(hdc, L"启动默认在托盘；右键托盘可退出。", hint, RGB(100, 116, 139), 13, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    EndPaint(hwnd, &ps);
+}
+
+static LRESULT CALLBACK panel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_PAINT:
+            paint_panel(hwnd);
+            return 0;
+        case WM_LBUTTONDOWN: {
+            int x = GET_X_LPARAM(lp);
+            int y = GET_Y_LPARAM(lp);
+            if (point_in_rect(g_toggle_rect, x, y)) set_enabled(!g_enabled);
+            else if (point_in_rect(g_autostart_rect, x, y)) set_autostart(!g_autostart);
+            else if (point_in_rect(g_slow_rect, x, y)) set_preset(0);
+            else if (point_in_rect(g_normal_rect, x, y)) set_preset(1);
+            else if (point_in_rect(g_fast_rect, x, y)) set_preset(2);
+            return 0;
+        }
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            lower_working_set();
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static LRESULT CALLBACK tray_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TRAY_ICON) {
+        if ((UINT)lp == WM_LBUTTONUP) show_panel();
+        else if ((UINT)lp == WM_RBUTTONUP) show_menu();
+        return 0;
+    }
+    if (msg == WM_COMMAND) {
+        switch (LOWORD(wp)) {
+            case CMD_TOGGLE: set_enabled(!g_enabled); break;
+            case CMD_AUTOSTART: set_autostart(!g_autostart); break;
+            case CMD_SHOW_UI: show_panel(); break;
+            case CMD_QUIT: DestroyWindow(hwnd); break;
+            default: break;
+        }
+        return 0;
+    }
+    if (msg == WM_APP) {
+        reload_config();
+        apply_runtime_wheel_lines();
+        update_ui();
+        update_tray_tip();
+        lower_working_set();
+        return 0;
+    }
+    if (msg == WM_DESTROY) {
+        remove_tray_icon();
+        if (g_panel_hwnd) DestroyWindow(g_panel_hwnd);
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static bool create_windows(HINSTANCE hInstance) {
+    WNDCLASSW wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = tray_proc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = L"ZenScrollTray";
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
+    if (!RegisterClassW(&wc)) return false;
+    g_tray_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"ZenScroll", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+    if (!g_tray_hwnd) return false;
+
+    WNDCLASSW pc;
+    ZeroMemory(&pc, sizeof(pc));
+    pc.lpfnWndProc = panel_proc;
+    pc.hInstance = hInstance;
+    pc.lpszClassName = L"ZenScrollPanel";
+    pc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
+    pc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    pc.hbrBackground = CreateSolidBrush(RGB(11, 18, 32));
+    if (!RegisterClassW(&pc)) return false;
+    g_panel_hwnd = CreateWindowExW(0, pc.lpszClassName, L"ZenScroll", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 470, 390, NULL, NULL, hInstance, NULL);
+    return g_panel_hwnd != NULL;
+}
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR cmd, int show) {
+    (void)hPrev; (void)cmd; (void)show;
+    HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
+    InitializeCriticalSection(&g_lock);
+    reload_config();
+    if (g_autostart) set_autostart_registry(true);
+    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &g_original_scroll_lines, 0);
+    apply_runtime_wheel_lines();
+
+    if (!create_windows(hInstance)) { restore_wheel_lines(); return 1; }
+    g_hook = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hInstance, 0);
+    if (!g_hook) { restore_wheel_lines(); return 2; }
+    add_tray_icon();
+    update_ui();
+    update_tray_tip();
+    g_worker = CreateThread(NULL, 64 * 1024, worker_thread, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    ShowWindow(g_panel_hwnd, SW_HIDE);
+    lower_working_set();
+
+    MSG msg;
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    InterlockedExchange(&g_running, 0);
+    if (g_worker) { WaitForSingleObject(g_worker, 1000); CloseHandle(g_worker); }
+    if (g_hook) UnhookWindowsHookEx(g_hook);
+    restore_wheel_lines();
+    DeleteCriticalSection(&g_lock);
+    return 0;
+}
+
+
+
